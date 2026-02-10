@@ -1,0 +1,31 @@
+{
+  "appId": "com.startagent.manager",
+  "productName": "START-AGENT Manager",
+  "asar": true,
+  "compression": "maximum",
+  "files": [
+    "dist/**/*",
+    "dist-electron/**/*",
+    "package.json"
+  ],
+  "directories": {
+    "output": "release"
+  },
+  "win": {
+    "signAndEditExecutable": false,
+    "target": [
+      {
+        "target": "nsis",
+        "arch": [
+          "x64"
+        ]
+      }
+    ]
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": "always"
+  },
+  "artifactName": "${productName}-Setup-${version}.${ext}"
+}
