@@ -290,6 +290,30 @@ const commitAndPush = async (request: GitCommitRequest): Promise<GitCommitResult
     };
   }
 
+  const remoteCheck = await runGit(["remote", "get-url", "origin"], request.projectPath);
+  if (remoteCheck.code !== 0) {
+    const maybeGithubUrl = settingsState.projectMetaByPath[request.projectPath]?.githubUrl;
+    if (!maybeGithubUrl) {
+      return {
+        ok: false,
+        step: "validate",
+        message: "No git remote origin found. Set GitHub URL first.",
+        stdout: remoteCheck.stdout,
+        stderr: remoteCheck.stderr
+      };
+    }
+    const warning = await ensureGitOrigin(request.projectPath, maybeGithubUrl);
+    if (warning) {
+      return {
+        ok: false,
+        step: "validate",
+        message: `Failed to configure origin: ${warning}`,
+        stdout: "",
+        stderr: warning
+      };
+    }
+  }
+
   const add = await runGit(["add", "."], request.projectPath);
   if (add.code !== 0) {
     return {
@@ -302,17 +326,29 @@ const commitAndPush = async (request: GitCommitRequest): Promise<GitCommitResult
   }
 
   const commit = await runGit(["commit", "-m", message], request.projectPath);
-  if (commit.code !== 0) {
+  const commitOutput = `${commit.stdout}\n${commit.stderr}`.toLowerCase();
+  const noChanges = commitOutput.includes("nothing to commit");
+  if (commit.code !== 0 && !noChanges) {
     return {
       ok: false,
       step: "commit",
-      message: "git commit failed (possibly no changes).",
+      message: "git commit failed.",
       stdout: commit.stdout,
       stderr: commit.stderr
     };
   }
 
-  const push = await runGit(["push"], request.projectPath);
+  let push = await runGit(["push"], request.projectPath);
+  if (push.code !== 0) {
+    const pushText = `${push.stdout}\n${push.stderr}`.toLowerCase();
+    const needsUpstream =
+      pushText.includes("no upstream branch") ||
+      pushText.includes("set-upstream") ||
+      pushText.includes("has no upstream");
+    if (needsUpstream) {
+      push = await runGit(["push", "--set-upstream", "origin", "HEAD"], request.projectPath);
+    }
+  }
   if (push.code !== 0) {
     return {
       ok: false,
@@ -326,7 +362,9 @@ const commitAndPush = async (request: GitCommitRequest): Promise<GitCommitResult
   return {
     ok: true,
     step: "push",
-    message: "Commit and push completed.",
+    message: noChanges
+      ? "No new changes to commit. Push completed for existing commits."
+      : "Commit and push completed.",
     stdout: [add.stdout, commit.stdout, push.stdout].join("\n"),
     stderr: [add.stderr, commit.stderr, push.stderr].join("\n")
   };

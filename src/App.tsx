@@ -215,10 +215,17 @@ const App = (): JSX.Element => {
           message
         });
         if (!result.ok) {
-          setStatus(`Commit failed at ${result.step}: ${result.message}`);
+          const errLine =
+            result.stderr
+              ?.split(/\r?\n/)
+              .map((line) => line.trim())
+              .find((line) => line.length > 0) ?? "";
+          setStatus(
+            `Commit failed at ${result.step}: ${result.message}${errLine ? ` | ${errLine}` : ""}`
+          );
           return;
         }
-        setStatus(`Commit+push completed for ${editorProject.name}`);
+        setStatus(`${result.message} (${editorProject.name})`);
       }
       closeEditor();
     } catch (error) {
