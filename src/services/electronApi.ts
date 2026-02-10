@@ -34,7 +34,11 @@ const fallbackApi: DesktopApi = {
   }),
   focusTerminalLaunch: async () => ({ ok: false, message: "Electron preload API not available." }),
   setTerminalLaunchNote: async () => ({ ok: false, message: "Electron preload API not available." }),
-  removeTerminalLaunch: async () => ({ ok: false, message: "Electron preload API not available." })
+  removeTerminalLaunch: async () => ({ ok: false, message: "Electron preload API not available." }),
+  minimizeWindow: async () => ({ ok: true }),
+  maximizeWindow: async () => ({ ok: true }),
+  closeWindow: async () => ({ ok: true }),
+  isMaximized: async () => ({ isMaximized: false })
 };
 
 export const electronApi: DesktopApi = api ?? fallbackApi;

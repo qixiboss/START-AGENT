@@ -112,7 +112,11 @@ export const IpcChannels = {
   TerminalLaunchesList: "terminal:launches:list",
   TerminalLaunchesFocus: "terminal:launches:focus",
   TerminalLaunchesNoteSet: "terminal:launches:note:set",
-  TerminalLaunchesRemove: "terminal:launches:remove"
+  TerminalLaunchesRemove: "terminal:launches:remove",
+  WindowMinimize: "window:minimize",
+  WindowMaximize: "window:maximize",
+  WindowClose: "window:close",
+  WindowIsMaximized: "window:isMaximized"
 } as const;
 
 export type DesktopApi = {
@@ -131,4 +135,8 @@ export type DesktopApi = {
     note: string
   ) => Promise<{ ok: true; record: TerminalLaunchRecord } | { ok: false; message: string }>;
   removeTerminalLaunch: (recordId: string) => Promise<{ ok: true } | { ok: false; message: string }>;
+  minimizeWindow: () => Promise<{ ok: true }>;
+  maximizeWindow: () => Promise<{ ok: true }>;
+  closeWindow: () => Promise<{ ok: true }>;
+  isMaximized: () => Promise<{ isMaximized: boolean }>;
 };

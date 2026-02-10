@@ -38,7 +38,11 @@ const api = {
   ): Promise<{ ok: true; record: TerminalLaunchRecord } | { ok: false; message: string }> =>
     ipcRenderer.invoke(IpcChannels.TerminalLaunchesNoteSet, { recordId, note }),
   removeTerminalLaunch: (recordId: string): Promise<{ ok: true } | { ok: false; message: string }> =>
-    ipcRenderer.invoke(IpcChannels.TerminalLaunchesRemove, { recordId })
+    ipcRenderer.invoke(IpcChannels.TerminalLaunchesRemove, { recordId }),
+  minimizeWindow: (): Promise<{ ok: true }> => ipcRenderer.invoke(IpcChannels.WindowMinimize),
+  maximizeWindow: (): Promise<{ ok: true }> => ipcRenderer.invoke(IpcChannels.WindowMaximize),
+  closeWindow: (): Promise<{ ok: true }> => ipcRenderer.invoke(IpcChannels.WindowClose),
+  isMaximized: (): Promise<{ isMaximized: boolean }> => ipcRenderer.invoke(IpcChannels.WindowIsMaximized)
 };
 
 contextBridge.exposeInMainWorld("desktopApi", api);

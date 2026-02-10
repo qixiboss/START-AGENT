@@ -173,6 +173,8 @@ const createMainWindow = (): BrowserWindow => {
     minWidth: 980,
     minHeight: 640,
     show: false,
+    frame: false,
+    titleBarStyle: "hidden",
     backgroundColor: "#0a0f1c",
     webPreferences: {
       preload: path.join(app.getAppPath(), "dist-electron", "electron", "preload.js"),
@@ -927,6 +929,29 @@ const registerIpc = (mainWindow: BrowserWindow): void => {
     async (_event, payload: { recordId: string }): Promise<{ ok: true } | { ok: false; message: string }> =>
       removeTerminalLaunch(payload.recordId)
   );
+
+  ipcMain.handle(IpcChannels.WindowMinimize, async () => {
+    mainWindow.minimize();
+    return { ok: true };
+  });
+
+  ipcMain.handle(IpcChannels.WindowMaximize, async () => {
+    if (mainWindow.isMaximized()) {
+      mainWindow.unmaximize();
+    } else {
+      mainWindow.maximize();
+    }
+    return { ok: true };
+  });
+
+  ipcMain.handle(IpcChannels.WindowClose, async () => {
+    mainWindow.close();
+    return { ok: true };
+  });
+
+  ipcMain.handle(IpcChannels.WindowIsMaximized, async () => {
+    return { isMaximized: mainWindow.isMaximized() };
+  });
 };
 
 app.whenReady().then(async () => {

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ProjectFilter, ProjectList } from "./components/ProjectList";
+import TitleBar from "./components/TitleBar";
 import { electronApi } from "./services/electronApi";
 import type {
   GitRemoteHistoryResult,
@@ -422,6 +423,7 @@ const App = (): JSX.Element => {
 
   return (
     <main className="app-shell">
+      <TitleBar />
       <header className="hero-bar">
         <div>
           <p className="eyebrow">START-AGENT</p>
