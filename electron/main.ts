@@ -1,5 +1,6 @@
 import path from "node:path";
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { app, BrowserWindow, dialog, ipcMain } from "electron";
@@ -68,6 +69,11 @@ const persistSettings = async (): Promise<void> => {
   await fs.writeFile(getSettingsPath(), JSON.stringify(settingsState, null, 2), "utf-8");
 };
 
+const persistSettingsSync = (): void => {
+  fsSync.mkdirSync(path.dirname(getSettingsPath()), { recursive: true });
+  fsSync.writeFileSync(getSettingsPath(), JSON.stringify(settingsState, null, 2), "utf-8");
+};
+
 const schedulePersistSettings = (): void => {
   if (saveTimer) {
     clearTimeout(saveTimer);
@@ -126,19 +132,27 @@ const createMainWindow = (): BrowserWindow => {
     height: 860,
     minWidth: 980,
     minHeight: 640,
+    show: false,
     backgroundColor: "#0a0f1c",
     webPreferences: {
       preload: path.join(app.getAppPath(), "dist-electron", "electron", "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: false,
+      spellcheck: false
     }
+  });
+
+  mainWindow.once("ready-to-show", () => {
+    mainWindow.show();
   });
 
   const devUrl = process.env.VITE_DEV_SERVER_URL;
   if (devUrl) {
     void mainWindow.loadURL(devUrl);
-    mainWindow.webContents.openDevTools({ mode: "detach" });
+    if (process.env.OPEN_DEVTOOLS === "1") {
+      mainWindow.webContents.openDevTools({ mode: "detach" });
+    }
   } else {
     void mainWindow.loadFile(path.join(app.getAppPath(), "dist", "index.html"));
   }
@@ -677,7 +691,20 @@ app.on("window-all-closed", () => {
     session.ptyProcess.kill();
   }
   sessions.clear();
+  try {
+    persistSettingsSync();
+  } catch {
+    // Ignore flush failures at shutdown.
+  }
   if (process.platform !== "darwin") {
     app.quit();
+  }
+});
+
+app.on("before-quit", () => {
+  try {
+    persistSettingsSync();
+  } catch {
+    // Ignore flush failures at shutdown.
   }
 });

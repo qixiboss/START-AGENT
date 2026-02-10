@@ -10,9 +10,12 @@
     "dev:electron:tsc": "tsc -p tsconfig.electron.json --watch --preserveWatchOutput",
     "dev:electron": "wait-on tcp:5173 file:dist-electron/electron/main.js file:dist-electron/electron/preload.js && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .",
     "build": "vite build && tsc -p tsconfig.electron.json",
-    "start": "electron ."
+    "start": "electron .",
+    "pack:win": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win --dir",
+    "dist:win": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win nsis"
   },
   "dependencies": {
+    "node-pty": "^1.1.0-beta34",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "xterm": "^5.3.0",
@@ -26,9 +29,42 @@
     "concurrently": "^9.1.0",
     "cross-env": "^7.0.3",
     "electron": "^34.0.0",
-    "node-pty": "^1.1.0-beta34",
+    "electron-builder": "^25.1.8",
     "typescript": "^5.7.2",
     "vite": "^6.0.1",
     "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.startagent.manager",
+    "productName": "START-AGENT Manager",
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/node-pty/**/*"
+    ],
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": "always"
+    },
+    "artifactName": "${productName}-Setup-${version}.${ext}"
   }
 }

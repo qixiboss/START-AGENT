@@ -16,6 +16,23 @@ npm run build
 npm run start
 ```
 
+## Windows EXE (NSIS)
+
+```powershell
+npm run dist:win
+```
+
+Installer output:
+
+- `release/START-AGENT Manager-Setup-<version>.exe`
+
+## Performance Notes
+
+- Main window now uses `show: false` and displays on `ready-to-show` to reduce startup jank.
+- DevTools only opens when `OPEN_DEVTOOLS=1` in dev mode.
+- Project cards are memoized to reduce unnecessary list rerenders.
+- Settings persistence keeps debounce writes and forces sync flush on quit to reduce runtime IO churn and avoid data loss.
+
 ## Notes
 
 - The project root defaults to the current working directory (`process.cwd()`).

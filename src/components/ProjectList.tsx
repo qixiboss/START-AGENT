@@ -1,3 +1,4 @@
+import { memo } from "react";
 import type { ProjectItem, ToolType } from "../types/ipc";
 
 type ProjectListProps = {
@@ -16,7 +17,64 @@ type ProjectListProps = {
   onViewConversation: (project: ProjectItem) => void;
 };
 
-export const ProjectList = ({
+type ProjectCardProps = {
+  project: ProjectItem;
+  onLaunch: (project: ProjectItem, tool: ToolType) => void;
+  onEditNote: (project: ProjectItem) => void;
+  onEditGithub: (project: ProjectItem) => void;
+  onCommitPush: (project: ProjectItem) => void;
+  onViewConversation: (project: ProjectItem) => void;
+};
+
+const ProjectCard = memo(
+  ({
+    project,
+    onLaunch,
+    onEditNote,
+    onEditGithub,
+    onCommitPush,
+    onViewConversation
+  }: ProjectCardProps): JSX.Element => {
+    return (
+      <article className="project-card">
+        <div className="project-title">{project.name}</div>
+        <div className="project-path">{project.path}</div>
+        {project.meta?.note ? <div className="project-note">{project.meta.note}</div> : null}
+        {project.meta?.githubUrl ? (
+          <a className="project-link" href={project.meta.githubUrl} title={project.meta.githubUrl}>
+            {project.meta.githubUrl}
+          </a>
+        ) : null}
+        <div className="actions">
+          <button className="btn primary" onClick={() => onLaunch(project, "codex")}>
+            Open Codex
+          </button>
+          <button className="btn alt" onClick={() => onLaunch(project, "claude")}>
+            Open Claude
+          </button>
+        </div>
+        <div className="actions">
+          <button className="btn secondary" onClick={() => onEditNote(project)}>
+            Note
+          </button>
+          <button className="btn secondary" onClick={() => onEditGithub(project)}>
+            GitHub
+          </button>
+          <button className="btn secondary" onClick={() => onCommitPush(project)}>
+            Commit+Push
+          </button>
+          <button className="btn secondary" onClick={() => onViewConversation(project)}>
+            Conversation
+          </button>
+        </div>
+      </article>
+    );
+  }
+);
+
+ProjectCard.displayName = "ProjectCard";
+
+export const ProjectList = memo(({
   collapsed,
   rootPath,
   projects,
@@ -81,40 +139,19 @@ export const ProjectList = ({
 
       <div className="project-grid">
         {projects.map((project) => (
-          <article key={project.path} className="project-card">
-            <div className="project-title">{project.name}</div>
-            <div className="project-path">{project.path}</div>
-            {project.meta?.note ? <div className="project-note">{project.meta.note}</div> : null}
-            {project.meta?.githubUrl ? (
-              <a className="project-link" href={project.meta.githubUrl} title={project.meta.githubUrl}>
-                {project.meta.githubUrl}
-              </a>
-            ) : null}
-            <div className="actions">
-              <button className="btn primary" onClick={() => onLaunch(project, "codex")}>
-                Open Codex
-              </button>
-              <button className="btn alt" onClick={() => onLaunch(project, "claude")}>
-                Open Claude
-              </button>
-            </div>
-            <div className="actions">
-              <button className="btn secondary" onClick={() => onEditNote(project)}>
-                Note
-              </button>
-              <button className="btn secondary" onClick={() => onEditGithub(project)}>
-                GitHub
-              </button>
-              <button className="btn secondary" onClick={() => onCommitPush(project)}>
-                Commit+Push
-              </button>
-              <button className="btn secondary" onClick={() => onViewConversation(project)}>
-                Conversation
-              </button>
-            </div>
-          </article>
+          <ProjectCard
+            key={project.path}
+            project={project}
+            onLaunch={onLaunch}
+            onEditNote={onEditNote}
+            onEditGithub={onEditGithub}
+            onCommitPush={onCommitPush}
+            onViewConversation={onViewConversation}
+          />
         ))}
       </div>
     </section>
   );
-};
+});
+
+ProjectList.displayName = "ProjectList";
