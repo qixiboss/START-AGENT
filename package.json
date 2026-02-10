@@ -1,0 +1,34 @@
+{
+  "name": "start-agent-manager",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Windows project manager for launching Codex or Claude in embedded terminals.",
+  "main": "dist-electron/electron/main.js",
+  "scripts": {
+    "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:electron:tsc\" \"npm:dev:electron\"",
+    "dev:renderer": "vite",
+    "dev:electron:tsc": "tsc -p tsconfig.electron.json --watch --preserveWatchOutput",
+    "dev:electron": "wait-on tcp:5173 file:dist-electron/electron/main.js file:dist-electron/electron/preload.js && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .",
+    "build": "vite build && tsc -p tsconfig.electron.json",
+    "start": "electron ."
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "xterm": "^5.3.0",
+    "xterm-addon-fit": "^0.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.0",
+    "cross-env": "^7.0.3",
+    "electron": "^34.0.0",
+    "node-pty": "^1.1.0-beta34",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.1",
+    "wait-on": "^8.0.1"
+  }
+}
