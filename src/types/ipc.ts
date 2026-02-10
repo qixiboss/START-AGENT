@@ -16,9 +16,45 @@ export type ListProjectsResult =
 
 export type ToolType = "codex" | "claude";
 
+export type SessionPreset = {
+  id: string;
+  name: string;
+  tool: ToolType;
+  model: string;
+  systemPrompt: string;
+  launchCommand: string;
+  contextFiles: string[];
+  readonly: boolean;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type SessionPresetListResult =
+  | { ok: true; presets: SessionPreset[] }
+  | { ok: false; message: string; presets: SessionPreset[] };
+
+export type SessionPresetSaveRequest = {
+  id?: string;
+  name: string;
+  tool: ToolType;
+  model?: string;
+  systemPrompt?: string;
+  launchCommand?: string;
+  contextFiles?: string[];
+};
+
+export type SessionPresetSaveResult =
+  | { ok: true; preset: SessionPreset; presets: SessionPreset[] }
+  | { ok: false; message: string };
+
+export type SessionPresetDeleteResult =
+  | { ok: true; presets: SessionPreset[] }
+  | { ok: false; message: string };
+
 export type TerminalCreateRequest = {
   projectPath: string;
-  tool: ToolType;
+  tool?: ToolType;
+  presetId?: string;
 };
 
 export type TerminalSessionInfo = {
@@ -26,6 +62,8 @@ export type TerminalSessionInfo = {
   projectPath: string;
   tool: ToolType;
   title: string;
+  presetId?: string;
+  presetName?: string;
 };
 
 export type TerminalCreateResult =
@@ -124,6 +162,9 @@ export const IpcChannels = {
   GitRemoteHistory: "git:remoteHistory",
   ConversationList: "conversation:list",
   ConversationClear: "conversation:clear",
+  SessionPresetsList: "sessionPresets:list",
+  SessionPresetsSave: "sessionPresets:save",
+  SessionPresetsDelete: "sessionPresets:delete",
   DialogPickDirectory: "dialog:pickDirectory",
   TerminalCreate: "terminal:create",
   TerminalWrite: "terminal:write",
@@ -143,6 +184,9 @@ export type DesktopApi = {
   getRemoteHistory: (projectPath: string) => Promise<GitRemoteHistoryResult>;
   listConversation: (projectPath: string) => Promise<ConversationEntry[]>;
   clearConversation: (projectPath: string) => Promise<{ ok: true }>;
+  listSessionPresets: () => Promise<SessionPresetListResult>;
+  saveSessionPreset: (request: SessionPresetSaveRequest) => Promise<SessionPresetSaveResult>;
+  deleteSessionPreset: (id: string) => Promise<SessionPresetDeleteResult>;
   pickDirectory: () => Promise<PickDirectoryResult>;
   createTerminal: (request: TerminalCreateRequest) => Promise<TerminalCreateResult>;
   writeTerminal: (sessionId: string, data: string) => void;

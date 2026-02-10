@@ -16,35 +16,183 @@ import {
   ProjectMeta,
   ProjectMetaSetRequest,
   ProjectMetaSetResult,
+  SessionPreset,
+  SessionPresetDeleteResult,
+  SessionPresetListResult,
+  SessionPresetSaveRequest,
+  SessionPresetSaveResult,
   TerminalCreateRequest,
   TerminalCreateResult,
   TerminalErrorEvent,
-  TerminalExitEvent
+  TerminalExitEvent,
+  ToolType
 } from "../src/types/ipc.js";
+
+type StoredSessionPreset = Omit<SessionPreset, "readonly">;
 
 type TerminalSession = {
   id: string;
   ptyProcess: pty.IPty;
   projectPath: string;
-  tool: "codex" | "claude";
+  tool: ToolType;
+  presetId?: string;
+  presetName?: string;
 };
 
 type Settings = {
   projectRoot?: string;
   projectMetaByPath: Record<string, ProjectMeta>;
   conversationByPath: Record<string, ConversationEntry[]>;
+  sessionPresets: StoredSessionPreset[];
 };
 
 const sessions = new Map<string, TerminalSession>();
 const inputBuffers = new Map<string, string>();
 const SETTINGS_SAVE_DEBOUNCE_MS = 400;
 const CONVERSATION_MAX_PER_PROJECT = 800;
+const PRESET_MAX_CONTEXT_FILES = 12;
+const PRESET_BOOTSTRAP_DELAY_MS = 600;
+const PRESET_BOOTSTRAP_SYSTEM_PROMPT_MAX = 460;
+const PRESET_EPOCH = Date.UTC(2026, 0, 1);
+
+const isToolType = (value: unknown): value is ToolType => value === "codex" || value === "claude";
+
+const sanitizeSingleLine = (value: unknown, maxLength: number): string => {
+  if (typeof value !== "string") {
+    return "";
+  }
+  return value.replace(/\s+/g, " ").trim().slice(0, maxLength);
+};
+
+const sanitizeMultiLine = (value: unknown, maxLength: number): string => {
+  if (typeof value !== "string") {
+    return "";
+  }
+  return value.replace(/\r/g, "").trim().slice(0, maxLength);
+};
+
+const normalizeContextFiles = (files: unknown): string[] => {
+  if (!Array.isArray(files)) {
+    return [];
+  }
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const file of files) {
+    if (typeof file !== "string") {
+      continue;
+    }
+    const next = file.trim().slice(0, 320);
+    if (!next) {
+      continue;
+    }
+    const key = next.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    normalized.push(next);
+    if (normalized.length >= PRESET_MAX_CONTEXT_FILES) {
+      break;
+    }
+  }
+  return normalized;
+};
+
+const BUILTIN_SESSION_PRESETS: StoredSessionPreset[] = [
+  {
+    id: "builtin-code-review",
+    name: "代码审查",
+    tool: "codex",
+    model: "gpt-5-codex",
+    systemPrompt:
+      "你是严谨的代码审查助手。优先输出高风险问题，给出文件位置、原因、修复建议与回归验证要点。",
+    launchCommand: "",
+    contextFiles: ["README.md", "AGENTS.md"],
+    createdAt: PRESET_EPOCH,
+    updatedAt: PRESET_EPOCH
+  },
+  {
+    id: "builtin-bug-fix",
+    name: "Bug 修复",
+    tool: "codex",
+    model: "gpt-5-codex",
+    systemPrompt:
+      "你是资深调试工程师。先复现并定位根因，再给出最小改动修复方案，并列出验证步骤与副作用检查。",
+    launchCommand: "",
+    contextFiles: ["README.md"],
+    createdAt: PRESET_EPOCH + 1,
+    updatedAt: PRESET_EPOCH + 1
+  },
+  {
+    id: "builtin-requirement-breakdown",
+    name: "需求拆解",
+    tool: "codex",
+    model: "gpt-5-codex",
+    systemPrompt:
+      "你是需求分析助手。将需求拆为可执行任务，标注优先级、依赖关系、验收标准、风险与里程碑。",
+    launchCommand: "",
+    contextFiles: ["README.md"],
+    createdAt: PRESET_EPOCH + 2,
+    updatedAt: PRESET_EPOCH + 2
+  }
+];
+
+const BUILTIN_PRESET_IDS = new Set(BUILTIN_SESSION_PRESETS.map((preset) => preset.id));
+
+const toSessionPreset = (preset: StoredSessionPreset, readonlyPreset: boolean): SessionPreset => ({
+  ...preset,
+  readonly: readonlyPreset
+});
+
+const normalizeStoredPreset = (value: unknown): StoredSessionPreset | null => {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const candidate = value as Partial<StoredSessionPreset>;
+  const id = sanitizeSingleLine(candidate.id, 120);
+  if (!id || BUILTIN_PRESET_IDS.has(id)) {
+    return null;
+  }
+  const name = sanitizeSingleLine(candidate.name, 80);
+  if (!name) {
+    return null;
+  }
+  const tool: ToolType = isToolType(candidate.tool) ? candidate.tool : "codex";
+  const model = sanitizeSingleLine(candidate.model, 120);
+  const systemPrompt = sanitizeMultiLine(candidate.systemPrompt, 12000);
+  const launchCommand = sanitizeSingleLine(candidate.launchCommand, 400);
+  const contextFiles = normalizeContextFiles(candidate.contextFiles);
+  const createdAt =
+    typeof candidate.createdAt === "number" && Number.isFinite(candidate.createdAt)
+      ? candidate.createdAt
+      : Date.now();
+  const updatedAt =
+    typeof candidate.updatedAt === "number" && Number.isFinite(candidate.updatedAt)
+      ? candidate.updatedAt
+      : createdAt;
+  return {
+    id,
+    name,
+    tool,
+    model,
+    systemPrompt,
+    launchCommand,
+    contextFiles,
+    createdAt,
+    updatedAt
+  };
+};
+
+const sortCustomPresets = (presets: StoredSessionPreset[]): StoredSessionPreset[] => {
+  return [...presets].sort((a, b) => b.updatedAt - a.updatedAt || a.name.localeCompare(b.name, "zh-CN"));
+};
 
 let currentRootPath = process.env.PROJECT_ROOT || process.cwd();
 let settingsState: Settings = {
   projectRoot: currentRootPath,
   projectMetaByPath: {},
-  conversationByPath: {}
+  conversationByPath: {},
+  sessionPresets: []
 };
 let saveTimer: NodeJS.Timeout | null = null;
 let saveInFlight: Promise<void> | null = null;
@@ -112,16 +260,23 @@ const loadSettings = async (): Promise<Settings> => {
   try {
     const raw = await fs.readFile(getSettingsPath(), "utf-8");
     const parsed = JSON.parse(raw) as Partial<Settings>;
+    const customPresets = Array.isArray(parsed.sessionPresets)
+      ? parsed.sessionPresets
+          .map((preset) => normalizeStoredPreset(preset))
+          .filter((preset): preset is StoredSessionPreset => preset !== null)
+      : [];
     return {
       projectRoot: parsed.projectRoot,
       projectMetaByPath: parsed.projectMetaByPath ?? {},
-      conversationByPath: parsed.conversationByPath ?? {}
+      conversationByPath: parsed.conversationByPath ?? {},
+      sessionPresets: sortCustomPresets(customPresets)
     };
   } catch {
     return {
       projectRoot: undefined,
       projectMetaByPath: {},
-      conversationByPath: {}
+      conversationByPath: {},
+      sessionPresets: []
     };
   }
 };
@@ -317,6 +472,98 @@ const setProjectMeta = async (request: ProjectMetaSetRequest): Promise<ProjectMe
       message: error instanceof Error ? error.message : "Failed to save project metadata."
     };
   }
+};
+
+const listSessionPresets = (): SessionPresetListResult => {
+  const presets = [
+    ...BUILTIN_SESSION_PRESETS.map((preset) => toSessionPreset(preset, true)),
+    ...sortCustomPresets(settingsState.sessionPresets).map((preset) => toSessionPreset(preset, false))
+  ];
+  return { ok: true, presets };
+};
+
+const saveSessionPreset = (request: SessionPresetSaveRequest): SessionPresetSaveResult => {
+  const name = sanitizeSingleLine(request.name, 80);
+  if (!name) {
+    return { ok: false, message: "Preset name is required." };
+  }
+  if (!isToolType(request.tool)) {
+    return { ok: false, message: "Invalid tool. Use codex or claude." };
+  }
+  const model = sanitizeSingleLine(request.model, 120);
+  const systemPrompt = sanitizeMultiLine(request.systemPrompt, 12000);
+  const launchCommand = sanitizeSingleLine(request.launchCommand, 400);
+  const contextFiles = normalizeContextFiles(request.contextFiles);
+  const requestedId = sanitizeSingleLine(request.id, 120);
+  if (requestedId && BUILTIN_PRESET_IDS.has(requestedId)) {
+    return { ok: false, message: "Built-in presets are read-only." };
+  }
+
+  const now = Date.now();
+  const existingIndex = requestedId
+    ? settingsState.sessionPresets.findIndex((preset) => preset.id === requestedId)
+    : -1;
+
+  let savedPreset: StoredSessionPreset;
+  if (existingIndex >= 0) {
+    const prev = settingsState.sessionPresets[existingIndex];
+    savedPreset = {
+      ...prev,
+      name,
+      tool: request.tool,
+      model,
+      systemPrompt,
+      launchCommand,
+      contextFiles,
+      updatedAt: now
+    };
+    settingsState.sessionPresets[existingIndex] = savedPreset;
+  } else {
+    savedPreset = {
+      id: requestedId || crypto.randomUUID(),
+      name,
+      tool: request.tool,
+      model,
+      systemPrompt,
+      launchCommand,
+      contextFiles,
+      createdAt: now,
+      updatedAt: now
+    };
+    settingsState.sessionPresets.push(savedPreset);
+  }
+
+  settingsState.sessionPresets = sortCustomPresets(settingsState.sessionPresets);
+  schedulePersistSettings();
+  return {
+    ok: true,
+    preset: toSessionPreset(savedPreset, false),
+    presets: listSessionPresets().presets
+  };
+};
+
+const deleteSessionPreset = (id: string): SessionPresetDeleteResult => {
+  const normalizedId = sanitizeSingleLine(id, 120);
+  if (!normalizedId) {
+    return { ok: false, message: "Preset id is required." };
+  }
+  if (BUILTIN_PRESET_IDS.has(normalizedId)) {
+    return { ok: false, message: "Built-in presets cannot be deleted." };
+  }
+  const next = settingsState.sessionPresets.filter((preset) => preset.id !== normalizedId);
+  if (next.length === settingsState.sessionPresets.length) {
+    return { ok: false, message: "Preset not found." };
+  }
+  settingsState.sessionPresets = sortCustomPresets(next);
+  schedulePersistSettings();
+  return { ok: true, presets: listSessionPresets().presets };
+};
+
+const resolveSessionPresetById = (id?: string): SessionPreset | undefined => {
+  if (!id) {
+    return undefined;
+  }
+  return listSessionPresets().presets.find((preset) => preset.id === id);
 };
 
 const commitAndPush = async (request: GitCommitRequest): Promise<GitCommitResult> => {
@@ -570,18 +817,96 @@ const emitTerminalExit = (window: BrowserWindow, payload: TerminalExitEvent): vo
   window.webContents.send(IpcChannels.TerminalExit, payload);
 };
 
-const buildLaunchCommand = (tool: "codex" | "claude"): string => {
-  return `if (Get-Command ${tool} -ErrorAction SilentlyContinue) { ${tool} } else { Write-Host "[ERROR] Command '${tool}' not found in PATH." }`;
+const quotePowerShellString = (value: string): string => `'${value.replace(/'/g, "''")}'`;
+
+const applyModelToLaunchCommand = (command: string, model: string): string => {
+  if (!model) {
+    return command;
+  }
+  if (command.includes("{{model}}")) {
+    return command.replaceAll("{{model}}", quotePowerShellString(model));
+  }
+  if (/(^|\s)(--model|-m)(\s|=|$)/.test(command)) {
+    return command;
+  }
+  return `${command} --model ${quotePowerShellString(model)}`;
 };
 
-const createTerminalSession = (
+const buildLaunchCommand = (tool: ToolType, preset?: SessionPreset): string => {
+  const customLaunchCommand = preset?.launchCommand.trim();
+  if (customLaunchCommand) {
+    return applyModelToLaunchCommand(customLaunchCommand, preset?.model ?? "");
+  }
+  const command = applyModelToLaunchCommand(tool, preset?.model ?? "");
+  return `if (Get-Command ${tool} -ErrorAction SilentlyContinue) { ${command} } else { Write-Host "[ERROR] Command '${tool}' not found in PATH." }`;
+};
+
+const getContextFileHint = async (projectPath: string, contextFile: string): Promise<string> => {
+  const filePath = contextFile.trim();
+  if (!filePath) {
+    return "";
+  }
+  const absolutePath = path.isAbsolute(filePath)
+    ? path.resolve(filePath)
+    : path.resolve(projectPath, filePath);
+  const relativePath = path.relative(projectPath, absolutePath);
+  const displayPath =
+    !relativePath || relativePath.startsWith("..") || path.isAbsolute(relativePath)
+      ? absolutePath
+      : relativePath.replace(/\\/g, "/");
+  try {
+    const stats = await fs.stat(absolutePath);
+    if (!stats.isFile()) {
+      return `${displayPath}(not-file)`;
+    }
+    return displayPath;
+  } catch {
+    return `${displayPath}(missing)`;
+  }
+};
+
+const buildPresetBootstrapPrompt = async (
+  projectPath: string,
+  preset: SessionPreset
+): Promise<string | null> => {
+  const segments: string[] = [];
+  if (preset.model) {
+    segments.push(`model=${preset.model}`);
+  }
+  const systemPrompt = sanitizeSingleLine(preset.systemPrompt, PRESET_BOOTSTRAP_SYSTEM_PROMPT_MAX);
+  if (systemPrompt) {
+    segments.push(`system_prompt="${systemPrompt.replace(/"/g, "'")}"`);
+  }
+  if (preset.contextFiles.length > 0) {
+    const fileHints = (
+      await Promise.all(preset.contextFiles.map((contextFile) => getContextFileHint(projectPath, contextFile)))
+    ).filter((fileHint) => fileHint.length > 0);
+    if (fileHints.length > 0) {
+      segments.push(`context_files=${fileHints.join(", ")}`);
+    }
+  }
+  if (segments.length === 0) {
+    return null;
+  }
+  return `[SessionPreset:${preset.name}] ${segments.join(" | ")}. 请按此预设开始执行。`;
+};
+
+const createTerminalSession = async (
   mainWindow: BrowserWindow,
   request: TerminalCreateRequest
-): TerminalCreateResult => {
+): Promise<TerminalCreateResult> => {
   const sessionId = crypto.randomUUID();
   try {
     if (typeof pty.spawn !== "function") {
       return { ok: false, message: "node-pty failed to load: spawn is unavailable." };
+    }
+    const preset = resolveSessionPresetById(request.presetId);
+    if (request.presetId && !preset) {
+      return { ok: false, message: "Session preset not found." };
+    }
+    const tool = preset?.tool ?? request.tool;
+    if (!tool || !isToolType(tool)) {
+      return { ok: false, message: "Tool is required to launch a terminal session." };
     }
 
     const ptyProcess = pty.spawn("powershell.exe", ["-NoLogo"], {
@@ -605,19 +930,36 @@ const createTerminalSession = (
       id: sessionId,
       ptyProcess,
       projectPath: request.projectPath,
-      tool: request.tool
+      tool,
+      presetId: preset?.id,
+      presetName: preset?.name
     };
     sessions.set(sessionId, session);
     inputBuffers.set(sessionId, "");
-    ptyProcess.write(`${buildLaunchCommand(request.tool)}\r`);
+    ptyProcess.write(`${buildLaunchCommand(tool, preset)}\r`);
+
+    if (preset) {
+      const presetPrompt = await buildPresetBootstrapPrompt(request.projectPath, preset);
+      if (presetPrompt) {
+        setTimeout(() => {
+          const alive = sessions.get(sessionId);
+          if (!alive) {
+            return;
+          }
+          alive.ptyProcess.write(`${presetPrompt}\r`);
+        }, PRESET_BOOTSTRAP_DELAY_MS);
+      }
+    }
 
     return {
       ok: true,
       session: {
         id: sessionId,
         projectPath: request.projectPath,
-        tool: request.tool,
-        title: `${path.basename(request.projectPath)} - ${request.tool}`
+        tool,
+        title: `${path.basename(request.projectPath)} - ${tool}${preset ? ` · ${preset.name}` : ""}`,
+        presetId: preset?.id,
+        presetName: preset?.name
       }
     };
   } catch (error) {
@@ -658,6 +1000,16 @@ const registerIpc = (mainWindow: BrowserWindow): void => {
     schedulePersistSettings();
     return { ok: true };
   });
+
+  ipcMain.handle(IpcChannels.SessionPresetsList, async () => listSessionPresets());
+
+  ipcMain.handle(IpcChannels.SessionPresetsSave, async (_event, payload: SessionPresetSaveRequest) =>
+    saveSessionPreset(payload)
+  );
+
+  ipcMain.handle(IpcChannels.SessionPresetsDelete, async (_event, payload: { id: string }) =>
+    deleteSessionPreset(payload.id)
+  );
 
   ipcMain.handle(IpcChannels.DialogPickDirectory, async () => {
     const result = await dialog.showOpenDialog(mainWindow, {

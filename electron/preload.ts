@@ -9,6 +9,10 @@ import {
   PickDirectoryResult,
   ProjectMetaSetRequest,
   ProjectMetaSetResult,
+  SessionPresetDeleteResult,
+  SessionPresetListResult,
+  SessionPresetSaveRequest,
+  SessionPresetSaveResult,
   TerminalCreateRequest,
   TerminalCreateResult,
   TerminalDataEvent,
@@ -31,6 +35,12 @@ const api = {
     ipcRenderer.invoke(IpcChannels.ConversationList, { projectPath }),
   clearConversation: (projectPath: string): Promise<{ ok: true }> =>
     ipcRenderer.invoke(IpcChannels.ConversationClear, { projectPath }),
+  listSessionPresets: (): Promise<SessionPresetListResult> =>
+    ipcRenderer.invoke(IpcChannels.SessionPresetsList),
+  saveSessionPreset: (request: SessionPresetSaveRequest): Promise<SessionPresetSaveResult> =>
+    ipcRenderer.invoke(IpcChannels.SessionPresetsSave, request),
+  deleteSessionPreset: (id: string): Promise<SessionPresetDeleteResult> =>
+    ipcRenderer.invoke(IpcChannels.SessionPresetsDelete, { id }),
   pickDirectory: (): Promise<PickDirectoryResult> => ipcRenderer.invoke(IpcChannels.DialogPickDirectory),
   createTerminal: (request: TerminalCreateRequest): Promise<TerminalCreateResult> =>
     ipcRenderer.invoke(IpcChannels.TerminalCreate, request),

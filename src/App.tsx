@@ -7,12 +7,24 @@ import type {
   ConversationEntry,
   GitRemoteHistoryResult,
   ProjectItem,
+  SessionPreset,
+  SessionPresetSaveRequest,
   TerminalSessionInfo,
   ToolType
 } from "./types/ipc";
 
 type TerminalLayoutMode = "tabs" | "vertical" | "horizontal" | "grid";
 type EditorMode = "note" | "github" | "commit";
+type SessionPresetDraft = {
+  id?: string;
+  name: string;
+  tool: ToolType;
+  model: string;
+  systemPrompt: string;
+  launchCommand: string;
+  contextFilesText: string;
+};
+
 const SIDEBAR_COLLAPSE_KEY = "ui.sidebarCollapsed";
 
 const withTimeout = async <T,>(promise: Promise<T>, timeoutMs: number, errorMessage: string): Promise<T> =>
@@ -23,6 +35,31 @@ const withTimeout = async <T,>(promise: Promise<T>, timeoutMs: number, errorMess
       .catch((error) => reject(error))
       .finally(() => window.clearTimeout(timer));
   });
+
+const createEmptyPresetDraft = (): SessionPresetDraft => ({
+  name: "",
+  tool: "codex",
+  model: "gpt-5-codex",
+  systemPrompt: "",
+  launchCommand: "",
+  contextFilesText: "README.md"
+});
+
+const presetToDraft = (preset: SessionPreset): SessionPresetDraft => ({
+  id: preset.readonly ? undefined : preset.id,
+  name: preset.name,
+  tool: preset.tool,
+  model: preset.model,
+  systemPrompt: preset.systemPrompt,
+  launchCommand: preset.launchCommand,
+  contextFilesText: preset.contextFiles.join("\n")
+});
+
+const parseContextFiles = (raw: string): string[] =>
+  raw
+    .split(/\r?\n|,/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
 
 const App = (): JSX.Element => {
   const [projects, setProjects] = useState<ProjectItem[]>([]);
@@ -40,6 +77,12 @@ const App = (): JSX.Element => {
   const [editorValue, setEditorValue] = useState<string>("");
   const [remoteHistory, setRemoteHistory] = useState<GitRemoteHistoryResult | null>(null);
   const [remoteHistoryLoading, setRemoteHistoryLoading] = useState<boolean>(false);
+  const [sessionPresets, setSessionPresets] = useState<SessionPreset[]>([]);
+  const [presetModalOpen, setPresetModalOpen] = useState<boolean>(false);
+  const [presetSelectionId, setPresetSelectionId] = useState<string | null>(null);
+  const [presetDraft, setPresetDraft] = useState<SessionPresetDraft>(() => createEmptyPresetDraft());
+  const [presetSaving, setPresetSaving] = useState<boolean>(false);
+  const [presetError, setPresetError] = useState<string | null>(null);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
     try {
       return window.localStorage.getItem(SIDEBAR_COLLAPSE_KEY) === "1";
@@ -47,6 +90,11 @@ const App = (): JSX.Element => {
       return false;
     }
   });
+
+  const selectedPreset = useMemo(
+    () => sessionPresets.find((preset) => preset.id === presetSelectionId) ?? null,
+    [presetSelectionId, sessionPresets]
+  );
 
   const scanProjects = useCallback(async () => {
     setLoading(true);
@@ -76,9 +124,32 @@ const App = (): JSX.Element => {
     }
   }, []);
 
+  const loadSessionPresets = useCallback(async () => {
+    try {
+      const result = await withTimeout(
+        electronApi.listSessionPresets(),
+        7000,
+        "Timed out while loading session presets."
+      );
+      if (!result.ok) {
+        setSessionPresets(result.presets);
+        setPresetError(result.message);
+        setStatus(`Preset load failed: ${result.message}`);
+        return;
+      }
+      setSessionPresets(result.presets);
+      setPresetError(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown preset load error";
+      setPresetError(message);
+      setStatus(`Preset load failed: ${message}`);
+    }
+  }, []);
+
   useEffect(() => {
     void scanProjects();
-  }, [scanProjects]);
+    void loadSessionPresets();
+  }, [loadSessionPresets, scanProjects]);
 
   useEffect(() => {
     try {
@@ -146,6 +217,31 @@ const App = (): JSX.Element => {
       setStatus(`Failed to launch ${tool}: ${message}`);
     }
   }, []);
+
+  const launchPreset = useCallback(
+    async (project: ProjectItem, presetId: string) => {
+      const presetName = sessionPresets.find((preset) => preset.id === presetId)?.name ?? "preset";
+      try {
+        setStatus(`Opening preset ${presetName} for ${project.name}...`);
+        const result = await withTimeout(
+          electronApi.createTerminal({ projectPath: project.path, presetId }),
+          7000,
+          `Timed out while creating ${presetName} terminal session.`
+        );
+        if (!result.ok) {
+          setStatus(`Failed to launch preset ${presetName}: ${result.message}`);
+          return;
+        }
+        setSessions((prev) => [...prev, result.session]);
+        setActiveSessionId(result.session.id);
+        setStatus(`Opened ${result.session.title}`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Unknown preset launch error";
+        setStatus(`Failed to launch preset ${presetName}: ${message}`);
+      }
+    },
+    [sessionPresets]
+  );
 
   const closeSession = useCallback((sessionId: string) => {
     electronApi.closeTerminal(sessionId);
@@ -318,11 +414,135 @@ const App = (): JSX.Element => {
     }
   }, [conversationProject]);
 
+  const openPresetManager = useCallback(() => {
+    setPresetModalOpen(true);
+    setPresetError(null);
+    if (sessionPresets.length > 0) {
+      const first = sessionPresets[0];
+      setPresetSelectionId(first.id);
+      setPresetDraft(presetToDraft(first));
+    } else {
+      setPresetSelectionId(null);
+      setPresetDraft(createEmptyPresetDraft());
+    }
+  }, [sessionPresets]);
+
+  const closePresetManager = useCallback(() => {
+    setPresetModalOpen(false);
+    setPresetSaving(false);
+    setPresetError(null);
+  }, []);
+
+  const selectPreset = useCallback((preset: SessionPreset) => {
+    setPresetSelectionId(preset.id);
+    setPresetDraft(presetToDraft(preset));
+    setPresetError(null);
+  }, []);
+
+  const startCreatePreset = useCallback(() => {
+    setPresetSelectionId(null);
+    setPresetDraft(createEmptyPresetDraft());
+    setPresetError(null);
+  }, []);
+
+  const duplicatePreset = useCallback(() => {
+    if (!selectedPreset) {
+      return;
+    }
+    const draft = presetToDraft(selectedPreset);
+    setPresetSelectionId(null);
+    setPresetDraft({
+      ...draft,
+      id: undefined,
+      name: `${selectedPreset.name} - 自定义`
+    });
+    setPresetError(null);
+  }, [selectedPreset]);
+
+  const savePreset = useCallback(async () => {
+    const name = presetDraft.name.trim();
+    if (!name) {
+      setPresetError("Preset name is required.");
+      return;
+    }
+    const payload: SessionPresetSaveRequest = {
+      id: selectedPreset && !selectedPreset.readonly ? selectedPreset.id : undefined,
+      name,
+      tool: presetDraft.tool,
+      model: presetDraft.model.trim(),
+      systemPrompt: presetDraft.systemPrompt.trim(),
+      launchCommand: presetDraft.launchCommand.trim(),
+      contextFiles: parseContextFiles(presetDraft.contextFilesText)
+    };
+
+    setPresetSaving(true);
+    try {
+      const result = await withTimeout(
+        electronApi.saveSessionPreset(payload),
+        7000,
+        "Timed out while saving session preset."
+      );
+      if (!result.ok) {
+        setPresetError(result.message);
+        setStatus(`Failed to save preset: ${result.message}`);
+        return;
+      }
+      setSessionPresets(result.presets);
+      setPresetSelectionId(result.preset.id);
+      setPresetDraft(presetToDraft(result.preset));
+      setPresetError(null);
+      setStatus(`Saved preset ${result.preset.name}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown preset save error";
+      setPresetError(message);
+      setStatus(`Failed to save preset: ${message}`);
+    } finally {
+      setPresetSaving(false);
+    }
+  }, [presetDraft, selectedPreset]);
+
+  const removePreset = useCallback(async () => {
+    if (!selectedPreset || selectedPreset.readonly) {
+      setPresetError("Built-in presets cannot be deleted.");
+      return;
+    }
+    setPresetSaving(true);
+    try {
+      const result = await withTimeout(
+        electronApi.deleteSessionPreset(selectedPreset.id),
+        7000,
+        "Timed out while deleting session preset."
+      );
+      if (!result.ok) {
+        setPresetError(result.message);
+        setStatus(`Failed to delete preset: ${result.message}`);
+        return;
+      }
+      setSessionPresets(result.presets);
+      const next = result.presets[0];
+      if (next) {
+        setPresetSelectionId(next.id);
+        setPresetDraft(presetToDraft(next));
+      } else {
+        setPresetSelectionId(null);
+        setPresetDraft(createEmptyPresetDraft());
+      }
+      setPresetError(null);
+      setStatus(`Deleted preset ${selectedPreset.name}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown preset delete error";
+      setPresetError(message);
+      setStatus(`Failed to delete preset: ${message}`);
+    } finally {
+      setPresetSaving(false);
+    }
+  }, [selectedPreset]);
+
   const emptyTerminal = useMemo(
     () => (
       <div className="terminal-empty">
         <h3>No Terminal Session</h3>
-        <p>Choose a project, then click Open Codex or Open Claude to start.</p>
+        <p>Choose a project, then click Open Codex/Open Claude or a Session Preset.</p>
       </div>
     ),
     []
@@ -340,12 +560,15 @@ const App = (): JSX.Element => {
         collapsed={isSidebarCollapsed}
         rootPath={rootPath}
         projects={projects}
+        sessionPresets={sessionPresets}
         loading={loading}
         error={error}
         onToggleCollapse={() => setIsSidebarCollapsed((prev) => !prev)}
         onChooseFolder={() => void chooseFolder()}
         onRefresh={() => void scanProjects()}
+        onManagePresets={openPresetManager}
         onLaunch={launchTerminal}
+        onLaunchPreset={(project, presetId) => void launchPreset(project, presetId)}
         onEditNote={(project) => openEditor("note", project)}
         onEditGithub={(project) => openEditor("github", project)}
         onCommitPush={(project) => openEditor("commit", project)}
@@ -410,6 +633,154 @@ const App = (): JSX.Element => {
               ))}
         </div>
       </section>
+
+      {presetModalOpen ? (
+        <div className="modal-overlay" onClick={closePresetManager}>
+          <div className="modal-panel preset-modal" onClick={(event) => event.stopPropagation()}>
+            <header className="modal-header">
+              <div>
+                <h3>Session Presets</h3>
+                <p className="hint">Preset model, system prompt, launch command and context files.</p>
+              </div>
+              <div className="header-actions">
+                <button className="btn secondary" onClick={startCreatePreset} disabled={presetSaving}>
+                  New Custom
+                </button>
+                <button className="btn secondary" onClick={closePresetManager}>
+                  Close
+                </button>
+              </div>
+            </header>
+            <div className="preset-manager">
+              <aside className="preset-list">
+                {sessionPresets.map((preset) => (
+                  <button
+                    key={preset.id}
+                    className={`preset-item ${presetSelectionId === preset.id ? "active" : ""}`}
+                    onClick={() => selectPreset(preset)}
+                    disabled={presetSaving}
+                  >
+                    <span className="preset-item-name">{preset.name}</span>
+                    <span className={`pill ${preset.readonly ? "ok" : "warn"}`}>
+                      {preset.readonly ? "Built-in" : "Custom"}
+                    </span>
+                  </button>
+                ))}
+              </aside>
+
+              <section className="preset-editor">
+                {selectedPreset?.readonly ? (
+                  <div className="warn-box">Built-in presets are read-only. Duplicate it to customize.</div>
+                ) : null}
+                {presetError ? <div className="error-box">{presetError}</div> : null}
+
+                <label className="field-label">
+                  Name
+                  <input
+                    className="editor-input"
+                    value={presetDraft.name}
+                    onChange={(event) =>
+                      setPresetDraft((prev) => ({ ...prev, name: event.target.value }))
+                    }
+                    placeholder="Code Review (Custom)"
+                    disabled={presetSaving || !!selectedPreset?.readonly}
+                  />
+                </label>
+
+                <label className="field-label">
+                  Tool
+                  <select
+                    className="editor-input"
+                    value={presetDraft.tool}
+                    onChange={(event) =>
+                      setPresetDraft((prev) => ({ ...prev, tool: event.target.value as ToolType }))
+                    }
+                    disabled={presetSaving || !!selectedPreset?.readonly}
+                  >
+                    <option value="codex">codex</option>
+                    <option value="claude">claude</option>
+                  </select>
+                </label>
+
+                <label className="field-label">
+                  Model
+                  <input
+                    className="editor-input"
+                    value={presetDraft.model}
+                    onChange={(event) =>
+                      setPresetDraft((prev) => ({ ...prev, model: event.target.value }))
+                    }
+                    placeholder="gpt-5-codex"
+                    disabled={presetSaving || !!selectedPreset?.readonly}
+                  />
+                </label>
+
+                <label className="field-label">
+                  Launch Command
+                  <input
+                    className="editor-input"
+                    value={presetDraft.launchCommand}
+                    onChange={(event) =>
+                      setPresetDraft((prev) => ({ ...prev, launchCommand: event.target.value }))
+                    }
+                    placeholder="Leave empty to use default codex/claude command. Use {{model}} placeholder if needed."
+                    disabled={presetSaving || !!selectedPreset?.readonly}
+                  />
+                </label>
+
+                <label className="field-label">
+                  System Prompt
+                  <textarea
+                    className="editor-input multiline"
+                    value={presetDraft.systemPrompt}
+                    onChange={(event) =>
+                      setPresetDraft((prev) => ({ ...prev, systemPrompt: event.target.value }))
+                    }
+                    placeholder="You are a senior software engineer..."
+                    disabled={presetSaving || !!selectedPreset?.readonly}
+                  />
+                </label>
+
+                <label className="field-label">
+                  Context Files
+                  <textarea
+                    className="editor-input multiline short"
+                    value={presetDraft.contextFilesText}
+                    onChange={(event) =>
+                      setPresetDraft((prev) => ({ ...prev, contextFilesText: event.target.value }))
+                    }
+                    placeholder={"README.md\nAGENTS.md\nsrc/App.tsx"}
+                    disabled={presetSaving || !!selectedPreset?.readonly}
+                  />
+                </label>
+
+                <div className="preset-editor-actions">
+                  {selectedPreset?.readonly ? (
+                    <button className="btn primary" onClick={duplicatePreset} disabled={presetSaving}>
+                      Duplicate as Custom
+                    </button>
+                  ) : (
+                    <>
+                      <button className="btn primary" onClick={() => void savePreset()} disabled={presetSaving}>
+                        {presetSaving ? "Saving..." : "Save Preset"}
+                      </button>
+                      {selectedPreset ? (
+                        <button
+                          className="btn secondary"
+                          onClick={() => void removePreset()}
+                          disabled={presetSaving}
+                        >
+                          Delete
+                        </button>
+                      ) : null}
+                    </>
+                  )}
+                </div>
+              </section>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {conversationProject ? (
         <div className="modal-overlay" onClick={() => setConversationProject(null)}>

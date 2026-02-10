@@ -1,16 +1,19 @@
 import { memo } from "react";
-import type { ProjectItem, ToolType } from "../types/ipc";
+import type { ProjectItem, SessionPreset, ToolType } from "../types/ipc";
 
 type ProjectListProps = {
   collapsed: boolean;
   rootPath: string;
   projects: ProjectItem[];
+  sessionPresets: SessionPreset[];
   loading: boolean;
   error: string | null;
   onToggleCollapse: () => void;
   onChooseFolder: () => void;
   onRefresh: () => void;
+  onManagePresets: () => void;
   onLaunch: (project: ProjectItem, tool: ToolType) => void;
+  onLaunchPreset: (project: ProjectItem, presetId: string) => void;
   onEditNote: (project: ProjectItem) => void;
   onEditGithub: (project: ProjectItem) => void;
   onCommitPush: (project: ProjectItem) => void;
@@ -19,7 +22,9 @@ type ProjectListProps = {
 
 type ProjectCardProps = {
   project: ProjectItem;
+  sessionPresets: SessionPreset[];
   onLaunch: (project: ProjectItem, tool: ToolType) => void;
+  onLaunchPreset: (project: ProjectItem, presetId: string) => void;
   onEditNote: (project: ProjectItem) => void;
   onEditGithub: (project: ProjectItem) => void;
   onCommitPush: (project: ProjectItem) => void;
@@ -29,7 +34,9 @@ type ProjectCardProps = {
 const ProjectCard = memo(
   ({
     project,
+    sessionPresets,
     onLaunch,
+    onLaunchPreset,
     onEditNote,
     onEditGithub,
     onCommitPush,
@@ -53,6 +60,23 @@ const ProjectCard = memo(
             Open Claude
           </button>
         </div>
+        {sessionPresets.length > 0 ? (
+          <>
+            <div className="preset-label">Session Presets</div>
+            <div className="preset-actions">
+              {sessionPresets.map((preset) => (
+                <button
+                  key={preset.id}
+                  className={`btn secondary preset-btn ${preset.readonly ? "builtin" : "custom"}`}
+                  title={preset.systemPrompt || `Launch with ${preset.name}`}
+                  onClick={() => onLaunchPreset(project, preset.id)}
+                >
+                  {preset.name}
+                </button>
+              ))}
+            </div>
+          </>
+        ) : null}
         <div className="actions">
           <button className="btn secondary" onClick={() => onEditNote(project)}>
             Note
@@ -78,12 +102,15 @@ export const ProjectList = memo(({
   collapsed,
   rootPath,
   projects,
+  sessionPresets,
   loading,
   error,
   onToggleCollapse,
   onChooseFolder,
   onRefresh,
+  onManagePresets,
   onLaunch,
+  onLaunchPreset,
   onEditNote,
   onEditGithub,
   onCommitPush,
@@ -128,6 +155,9 @@ export const ProjectList = memo(({
           <button className="btn secondary" onClick={onRefresh} disabled={loading}>
             {loading ? "Scanning..." : "Refresh"}
           </button>
+          <button className="btn secondary" onClick={onManagePresets}>
+            Session Presets
+          </button>
         </div>
       </header>
 
@@ -142,7 +172,9 @@ export const ProjectList = memo(({
           <ProjectCard
             key={project.path}
             project={project}
+            sessionPresets={sessionPresets}
             onLaunch={onLaunch}
+            onLaunchPreset={onLaunchPreset}
             onEditNote={onEditNote}
             onEditGithub={onEditGithub}
             onCommitPush={onCommitPush}
