@@ -14,6 +14,37 @@ export type ListProjectsResult =
   | { ok: true; projects: ProjectItem[]; rootPath: string }
   | { ok: false; message: string; projects: ProjectItem[]; rootPath: string };
 
+export type ProjectHealthBuildStatus =
+  | "pass"
+  | "fail"
+  | "missing_script"
+  | "missing_manifest"
+  | "skipped"
+  | "unknown";
+
+export type ProjectHealthRisk = "low" | "medium" | "high";
+
+export type ProjectHealthItem = {
+  projectPath: string;
+  projectName: string;
+  lastCommitAt: number | null;
+  uncommittedChanges: number | null;
+  dependencyCount: number | null;
+  buildStatus: ProjectHealthBuildStatus;
+  buildMessage?: string;
+  score: number;
+  riskLevel: ProjectHealthRisk;
+};
+
+export type ProjectHealthRequest = {
+  projectPaths?: string[];
+  includeBuildCheck?: boolean;
+};
+
+export type ProjectHealthResult =
+  | { ok: true; generatedAt: number; items: ProjectHealthItem[] }
+  | { ok: false; generatedAt: number; message: string; items: ProjectHealthItem[] };
+
 export type ToolType = "codex" | "claude";
 
 export type TerminalCreateRequest = {
@@ -119,6 +150,7 @@ export const IpcChannels = {
   RootGet: "root:get",
   RootSet: "root:set",
   ListProjects: "projects:list",
+  ProjectHealth: "projects:health",
   ProjectMetaSet: "projectMeta:set",
   GitCommitAndPush: "git:commitAndPush",
   GitRemoteHistory: "git:remoteHistory",
@@ -138,6 +170,7 @@ export type DesktopApi = {
   getRootPath: () => Promise<{ rootPath: string }>;
   setRootPath: (path: string) => Promise<ListProjectsResult>;
   listProjects: () => Promise<ListProjectsResult>;
+  getProjectHealth: (request?: ProjectHealthRequest) => Promise<ProjectHealthResult>;
   setProjectMeta: (request: ProjectMetaSetRequest) => Promise<ProjectMetaSetResult>;
   commitAndPush: (request: GitCommitRequest) => Promise<GitCommitResult>;
   getRemoteHistory: (projectPath: string) => Promise<GitRemoteHistoryResult>;
