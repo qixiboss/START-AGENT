@@ -50,6 +50,16 @@ let saveTimer: NodeJS.Timeout | null = null;
 let saveInFlight: Promise<void> | null = null;
 
 const getSettingsPath = (): string => path.join(app.getPath("userData"), "settings.json");
+const getRuntimeLogPath = (): string => path.join(app.getPath("userData"), "runtime.log");
+
+const appendRuntimeLog = (message: string): void => {
+  try {
+    fsSync.mkdirSync(path.dirname(getRuntimeLogPath()), { recursive: true });
+    fsSync.appendFileSync(getRuntimeLogPath(), `[${new Date().toISOString()}] ${message}\n`, "utf-8");
+  } catch {
+    // Ignore logging failures.
+  }
+};
 
 const isReadableDirectory = async (dirPath: string): Promise<boolean> => {
   try {
@@ -143,8 +153,35 @@ const createMainWindow = (): BrowserWindow => {
     }
   });
 
+  let shown = false;
   mainWindow.once("ready-to-show", () => {
+    shown = true;
     mainWindow.show();
+  });
+  setTimeout(() => {
+    if (!shown && !mainWindow.isDestroyed()) {
+      appendRuntimeLog("ready-to-show timeout, forcing show()");
+      mainWindow.show();
+    }
+  }, 2500);
+
+  const showStartupError = (reason: string): void => {
+    appendRuntimeLog(reason);
+    const safeReason = reason.replace(/</g, "&lt;");
+    const safeLogPath = getRuntimeLogPath().replace(/</g, "&lt;");
+    const html = `<!doctype html><html><body style="font-family:Segoe UI;background:#0b1220;color:#d8e7ff;padding:16px;"><h2>Startup Error</h2><p>${safeReason}</p><p>Runtime log: ${safeLogPath}</p></body></html>`;
+    void mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+    mainWindow.show();
+  };
+
+  mainWindow.webContents.on("did-fail-load", (_event, code, description, validatedUrl) => {
+    showStartupError(`did-fail-load code=${code} desc=${description} url=${validatedUrl}`);
+  });
+  mainWindow.webContents.on("render-process-gone", (_event, details) => {
+    showStartupError(`renderer gone reason=${details.reason} code=${details.exitCode}`);
+  });
+  mainWindow.webContents.on("preload-error", (_event, preloadPath, error) => {
+    showStartupError(`preload error path=${preloadPath} message=${error?.message ?? "unknown"}`);
   });
 
   const devUrl = process.env.VITE_DEV_SERVER_URL;
