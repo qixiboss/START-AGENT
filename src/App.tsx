@@ -334,81 +334,118 @@ const App = (): JSX.Element => {
     remoteHistory.isUpToDate &&
     !remoteHistory.hasLocalChanges;
 
+  const activeSession = sessions.find((session) => session.id === activeSessionId) ?? null;
+  const displayedSessions =
+    layoutMode === "tabs" ? sessions.filter((session) => session.id === activeSessionId) : sessions;
+
   return (
-    <main className={`layout ${isSidebarCollapsed ? "sidebar-collapsed" : ""}`}>
-      <ProjectList
-        collapsed={isSidebarCollapsed}
-        rootPath={rootPath}
-        projects={projects}
-        loading={loading}
-        error={error}
-        onToggleCollapse={() => setIsSidebarCollapsed((prev) => !prev)}
-        onChooseFolder={() => void chooseFolder()}
-        onRefresh={() => void scanProjects()}
-        onLaunch={launchTerminal}
-        onEditNote={(project) => openEditor("note", project)}
-        onEditGithub={(project) => openEditor("github", project)}
-        onCommitPush={(project) => openEditor("commit", project)}
-        onViewConversation={(project) => void openConversation(project)}
-      />
-
-      <section className="panel terminal-panel">
-        <header className="panel-header">
-          <div>
-            <h2>Embedded Terminal</h2>
-            <p className="hint">{status}</p>
-          </div>
-          <div className="header-actions">
-            <button
-              className={`btn secondary ${layoutMode === "tabs" ? "selected" : ""}`}
-              onClick={() => setLayoutMode("tabs")}
-            >
-              Tabs
-            </button>
-            <button
-              className={`btn secondary ${layoutMode === "vertical" ? "selected" : ""}`}
-              onClick={() => setLayoutMode("vertical")}
-            >
-              Vertical
-            </button>
-            <button
-              className={`btn secondary ${layoutMode === "horizontal" ? "selected" : ""}`}
-              onClick={() => setLayoutMode("horizontal")}
-            >
-              Horizontal
-            </button>
-            <button
-              className={`btn secondary ${layoutMode === "grid" ? "selected" : ""}`}
-              onClick={() => setLayoutMode("grid")}
-            >
-              Grid
-            </button>
-          </div>
-        </header>
-
-        <TerminalTabs
-          sessions={sessions}
-          activeSessionId={activeSessionId}
-          onSelect={setActiveSessionId}
-          onClose={closeSession}
-        />
-
-        <div className={`terminal-area mode-${layoutMode}`}>
-          {sessions.length === 0
-            ? emptyTerminal
-            : sessions.map((session) => (
-                <TerminalSessionPane
-                  key={session.id}
-                  sessionId={session.id}
-                  active={activeSessionId === session.id}
-                  hidden={layoutMode === "tabs" && activeSessionId !== session.id}
-                  title={session.title}
-                  showHeader={layoutMode !== "tabs"}
-                  onActivate={() => setActiveSessionId(session.id)}
-                  onClose={() => closeSession(session.id)}
-                />
-              ))}
+    <main className="app-shell">
+      <header className="hero-bar">
+        <div>
+          <p className="eyebrow">START-AGENT</p>
+          <h1>Workspace Control Center</h1>
+          <p className="hint">
+            {sessions.length === 0
+              ? "Launch Codex or Claude from any project to start a terminal session."
+              : `Now focused on ${activeSession?.title ?? "the latest session"}.`}
+          </p>
         </div>
+        <div className="hero-metrics">
+          <div className="metric-card">
+            <span>Projects</span>
+            <strong>{projects.length}</strong>
+          </div>
+          <div className="metric-card">
+            <span>Sessions</span>
+            <strong>{sessions.length}</strong>
+          </div>
+          <div className="metric-card status-card">
+            <span>Status</span>
+            <strong title={status}>{status}</strong>
+          </div>
+        </div>
+      </header>
+
+      <section className={`workspace-shell ${isSidebarCollapsed ? "sidebar-collapsed" : ""}`}>
+        <section className="panel terminal-stage">
+          <header className="panel-header terminal-stage-header">
+            <div>
+              <h2>Terminal Stage</h2>
+              <p className="hint">
+                Mode: {layoutMode} | {activeSession?.title ?? "No active session"}
+              </p>
+            </div>
+            <div className="header-actions">
+              <button
+                className={`btn secondary ${layoutMode === "tabs" ? "selected" : ""}`}
+                onClick={() => setLayoutMode("tabs")}
+              >
+                Tabs
+              </button>
+              <button
+                className={`btn secondary ${layoutMode === "vertical" ? "selected" : ""}`}
+                onClick={() => setLayoutMode("vertical")}
+              >
+                Vertical
+              </button>
+              <button
+                className={`btn secondary ${layoutMode === "horizontal" ? "selected" : ""}`}
+                onClick={() => setLayoutMode("horizontal")}
+              >
+                Horizontal
+              </button>
+              <button
+                className={`btn secondary ${layoutMode === "grid" ? "selected" : ""}`}
+                onClick={() => setLayoutMode("grid")}
+              >
+                Grid
+              </button>
+            </div>
+          </header>
+
+          <TerminalTabs
+            sessions={sessions}
+            activeSessionId={activeSessionId}
+            onSelect={setActiveSessionId}
+            onClose={closeSession}
+          />
+
+          <div className={`terminal-area mode-${layoutMode}`}>
+            {sessions.length === 0
+              ? emptyTerminal
+              : displayedSessions.map((session) => (
+                  <TerminalSessionPane
+                    key={`${session.id}-${layoutMode}`}
+                    sessionId={session.id}
+                    layoutMode={layoutMode}
+                    active={activeSessionId === session.id}
+                    hidden={false}
+                    title={session.title}
+                    showHeader={layoutMode !== "tabs"}
+                    onActivate={() => setActiveSessionId(session.id)}
+                    onClose={() => closeSession(session.id)}
+                  />
+                ))}
+          </div>
+        </section>
+
+        <section className={`context-rail ${isSidebarCollapsed ? "collapsed" : ""}`}>
+          <ProjectList
+            collapsed={isSidebarCollapsed}
+            rootPath={rootPath}
+            projects={projects}
+            loading={loading}
+            error={error}
+            onToggleCollapse={() => setIsSidebarCollapsed((prev) => !prev)}
+            onChooseFolder={() => void chooseFolder()}
+            onRefresh={() => void scanProjects()}
+            onLaunch={launchTerminal}
+            onEditNote={(project) => openEditor("note", project)}
+            onEditGithub={(project) => openEditor("github", project)}
+            onCommitPush={(project) => openEditor("commit", project)}
+            onViewConversation={(project) => void openConversation(project)}
+          />
+        </section>
       </section>
 
       {conversationProject ? (

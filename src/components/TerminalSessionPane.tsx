@@ -6,6 +6,7 @@ import { electronApi } from "../services/electronApi";
 
 type TerminalSessionPaneProps = {
   sessionId: string;
+  layoutMode: "tabs" | "vertical" | "horizontal" | "grid";
   active: boolean;
   hidden: boolean;
   title: string;
@@ -16,6 +17,7 @@ type TerminalSessionPaneProps = {
 
 export const TerminalSessionPane = ({
   sessionId,
+  layoutMode,
   active,
   hidden,
   title,
@@ -26,6 +28,7 @@ export const TerminalSessionPane = ({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const lastSizeRef = useRef<{ cols: number; rows: number } | null>(null);
 
   useEffect(() => {
     if (!containerRef.current || terminalRef.current) {
@@ -38,8 +41,8 @@ export const TerminalSessionPane = ({
       fontSize: 14,
       cursorBlink: true,
       theme: {
-        background: "#04070e",
-        foreground: "#d7e5ff"
+        background: "#0f1115",
+        foreground: "#e8eaed"
       }
     });
     const fitAddon = new FitAddon();
@@ -53,6 +56,11 @@ export const TerminalSessionPane = ({
     const sendResize = (): void => {
       const cols = Math.max(term.cols, 2);
       const rows = Math.max(term.rows, 2);
+      const lastSize = lastSizeRef.current;
+      if (lastSize && lastSize.cols === cols && lastSize.rows === rows) {
+        return;
+      }
+      lastSizeRef.current = { cols, rows };
       electronApi.resizeTerminal(sessionId, cols, rows);
     };
 
@@ -93,6 +101,7 @@ export const TerminalSessionPane = ({
       term.dispose();
       terminalRef.current = null;
       fitAddonRef.current = null;
+      lastSizeRef.current = null;
     };
   }, [sessionId]);
 
@@ -100,13 +109,46 @@ export const TerminalSessionPane = ({
     if (!active || !fitAddonRef.current) {
       return;
     }
-    fitAddonRef.current.fit();
-    const terminal = terminalRef.current;
-    if (terminal) {
-      electronApi.resizeTerminal(sessionId, terminal.cols, terminal.rows);
+    const frame = window.requestAnimationFrame(() => {
+      const fitAddon = fitAddonRef.current;
+      const terminal = terminalRef.current;
+      if (!fitAddon || !terminal || hidden) {
+        return;
+      }
+      fitAddon.fit();
+      const cols = Math.max(terminal.cols, 2);
+      const rows = Math.max(terminal.rows, 2);
+      const lastSize = lastSizeRef.current;
+      if (!lastSize || lastSize.cols !== cols || lastSize.rows !== rows) {
+        lastSizeRef.current = { cols, rows };
+        electronApi.resizeTerminal(sessionId, cols, rows);
+      }
       terminal.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [active, hidden, sessionId]);
+
+  useEffect(() => {
+    if (hidden) {
+      return;
     }
-  }, [active, sessionId]);
+    const frame = window.requestAnimationFrame(() => {
+      const fitAddon = fitAddonRef.current;
+      const terminal = terminalRef.current;
+      if (!fitAddon || !terminal) {
+        return;
+      }
+      fitAddon.fit();
+      const cols = Math.max(terminal.cols, 2);
+      const rows = Math.max(terminal.rows, 2);
+      const lastSize = lastSizeRef.current;
+      if (!lastSize || lastSize.cols !== cols || lastSize.rows !== rows) {
+        lastSizeRef.current = { cols, rows };
+        electronApi.resizeTerminal(sessionId, cols, rows);
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [hidden, layoutMode, sessionId]);
 
   return (
     <div

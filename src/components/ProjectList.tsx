@@ -37,7 +37,9 @@ const ProjectCard = memo(
   }: ProjectCardProps): JSX.Element => {
     return (
       <article className="project-card">
-        <div className="project-title">{project.name}</div>
+        <div className="project-title-row">
+          <div className="project-title">{project.name}</div>
+        </div>
         <div className="project-path">{project.path}</div>
         {project.meta?.note ? <div className="project-note">{project.meta.note}</div> : null}
         {project.meta?.githubUrl ? (
@@ -45,15 +47,15 @@ const ProjectCard = memo(
             {project.meta.githubUrl}
           </a>
         ) : null}
-        <div className="actions">
+        <div className="actions primary-actions">
           <button className="btn primary" onClick={() => onLaunch(project, "codex")}>
             Open Codex
           </button>
-          <button className="btn alt" onClick={() => onLaunch(project, "claude")}>
+          <button className="btn ghost-accent" onClick={() => onLaunch(project, "claude")}>
             Open Claude
           </button>
         </div>
-        <div className="actions">
+        <div className="actions secondary-actions">
           <button className="btn secondary" onClick={() => onEditNote(project)}>
             Note
           </button>
@@ -94,12 +96,15 @@ export const ProjectList = memo(({
       <aside className="panel project-panel collapsed" aria-label="Collapsed project panel">
         <div className="sidebar-rail">
           <button
-            className="btn icon-btn"
+            className="btn icon-btn collapsed-toggle"
             onClick={onToggleCollapse}
             aria-label="Expand project sidebar"
             title="Expand projects"
           >
-            Projects
+            <span className="collapsed-toggle-icon" aria-hidden="true">
+              ||
+            </span>
+            <span>Projects</span>
           </button>
         </div>
       </aside>
@@ -110,7 +115,7 @@ export const ProjectList = memo(({
     <section className="panel project-panel">
       <header className="panel-header">
         <div>
-          <h2>Projects</h2>
+          <h2>Project Context</h2>
           <p className="hint">{rootPath}</p>
         </div>
         <div className="header-actions">
@@ -120,7 +125,7 @@ export const ProjectList = memo(({
             aria-label="Collapse project sidebar"
             title="Collapse projects"
           >
-            Hide
+            Collapse
           </button>
           <button className="btn secondary" onClick={onChooseFolder} disabled={loading}>
             Choose Folder

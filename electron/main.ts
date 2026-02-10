@@ -563,11 +563,30 @@ const processTerminalInputCapture = (session: TerminalSession, data: string): vo
 };
 
 const emitTerminalError = (window: BrowserWindow, payload: TerminalErrorEvent): void => {
-  window.webContents.send(IpcChannels.TerminalError, payload);
+  safeSendToRenderer(window, IpcChannels.TerminalError, payload);
 };
 
 const emitTerminalExit = (window: BrowserWindow, payload: TerminalExitEvent): void => {
-  window.webContents.send(IpcChannels.TerminalExit, payload);
+  safeSendToRenderer(window, IpcChannels.TerminalExit, payload);
+};
+
+const safeSendToRenderer = (
+  window: BrowserWindow,
+  channel: string,
+  payload: unknown
+): void => {
+  if (window.isDestroyed()) {
+    return;
+  }
+  const { webContents } = window;
+  if (webContents.isDestroyed()) {
+    return;
+  }
+  try {
+    webContents.send(channel, payload);
+  } catch {
+    // Ignore races where renderer was torn down between checks.
+  }
 };
 
 const buildLaunchCommand = (tool: "codex" | "claude"): string => {
@@ -592,7 +611,7 @@ const createTerminalSession = (
     });
 
     ptyProcess.onData((chunk) => {
-      mainWindow.webContents.send(IpcChannels.TerminalData, { sessionId, chunk });
+      safeSendToRenderer(mainWindow, IpcChannels.TerminalData, { sessionId, chunk });
     });
 
     ptyProcess.onExit((event) => {
