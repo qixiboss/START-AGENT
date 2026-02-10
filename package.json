@@ -28,6 +28,7 @@
     "cross-env": "^7.0.3",
     "electron": "^34.0.0",
     "electron-builder": "^25.1.8",
+    "terser": "^5.46.0",
     "typescript": "^5.7.2",
     "vite": "^6.0.1",
     "wait-on": "^8.0.1"
@@ -36,6 +37,7 @@
     "appId": "com.startagent.manager",
     "productName": "START-AGENT Manager",
     "asar": true,
+    "compression": "maximum",
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
@@ -57,7 +59,7 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
+      "allowToCheckInstallationDirectory": true,
       "createDesktopShortcut": "always"
     },
     "artifactName": "${productName}-Setup-${version}.${ext}"

@@ -5,7 +5,6 @@ import crypto from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import {
-  ConversationEntry,
   GitCommitRequest,
   GitCommitResult,
   GitRemoteHistoryResult,
@@ -24,7 +23,6 @@ import {
 type Settings = {
   projectRoot?: string;
   projectMetaByPath: Record<string, ProjectMeta>;
-  conversationByPath: Record<string, ConversationEntry[]>;
   terminalLaunches: TerminalLaunchRecord[];
 };
 
@@ -35,7 +33,6 @@ let currentRootPath = process.env.PROJECT_ROOT || process.cwd();
 let settingsState: Settings = {
   projectRoot: currentRootPath,
   projectMetaByPath: {},
-  conversationByPath: {},
   terminalLaunches: []
 };
 let saveTimer: NodeJS.Timeout | null = null;
@@ -147,14 +144,12 @@ const loadSettings = async (): Promise<Settings> => {
     return {
       projectRoot: parsed.projectRoot,
       projectMetaByPath: parsed.projectMetaByPath ?? {},
-      conversationByPath: parsed.conversationByPath ?? {},
       terminalLaunches: sanitizeLaunches(parsed.terminalLaunches)
     };
   } catch {
     return {
       projectRoot: undefined,
       projectMetaByPath: {},
-      conversationByPath: {},
       terminalLaunches: []
     };
   }
@@ -889,17 +884,6 @@ const registerIpc = (mainWindow: BrowserWindow): void => {
   ipcMain.handle(IpcChannels.GitRemoteHistory, async (_event, payload: { projectPath: string }) =>
     getRemoteHistory(payload.projectPath)
   );
-
-  ipcMain.handle(IpcChannels.ConversationList, async (_event, payload: { projectPath: string }) => {
-    const rows = settingsState.conversationByPath[payload.projectPath] ?? [];
-    return [...rows].sort((a, b) => b.createdAt - a.createdAt);
-  });
-
-  ipcMain.handle(IpcChannels.ConversationClear, async (_event, payload: { projectPath: string }) => {
-    settingsState.conversationByPath[payload.projectPath] = [];
-    schedulePersistSettings();
-    return { ok: true };
-  });
 
   ipcMain.handle(IpcChannels.DialogPickDirectory, async () => {
     const result = await dialog.showOpenDialog(mainWindow, {

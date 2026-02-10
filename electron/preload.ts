@@ -1,6 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
 import {
-  ConversationEntry,
   GitCommitRequest,
   GitCommitResult,
   GitRemoteHistoryResult,
@@ -26,10 +25,6 @@ const api = {
     ipcRenderer.invoke(IpcChannels.GitCommitAndPush, request),
   getRemoteHistory: (projectPath: string): Promise<GitRemoteHistoryResult> =>
     ipcRenderer.invoke(IpcChannels.GitRemoteHistory, { projectPath }),
-  listConversation: (projectPath: string): Promise<ConversationEntry[]> =>
-    ipcRenderer.invoke(IpcChannels.ConversationList, { projectPath }),
-  clearConversation: (projectPath: string): Promise<{ ok: true }> =>
-    ipcRenderer.invoke(IpcChannels.ConversationClear, { projectPath }),
   pickDirectory: (): Promise<PickDirectoryResult> => ipcRenderer.invoke(IpcChannels.DialogPickDirectory),
   launchTerminal: (request: TerminalLaunchRequest): Promise<TerminalLaunchResult> =>
     ipcRenderer.invoke(IpcChannels.TerminalLaunch, request),

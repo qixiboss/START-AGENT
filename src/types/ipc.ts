@@ -41,15 +41,6 @@ export type TerminalLaunchListResult =
   | { ok: true; launches: TerminalLaunchRecord[] }
   | { ok: false; message: string; launches: TerminalLaunchRecord[] };
 
-export type ConversationEntry = {
-  id: string;
-  projectPath: string;
-  tool: ToolType;
-  sessionId: string;
-  input: string;
-  createdAt: number;
-};
-
 export type ProjectMetaSetRequest = {
   projectPath: string;
   note?: string;
@@ -116,8 +107,6 @@ export const IpcChannels = {
   ProjectMetaSet: "projectMeta:set",
   GitCommitAndPush: "git:commitAndPush",
   GitRemoteHistory: "git:remoteHistory",
-  ConversationList: "conversation:list",
-  ConversationClear: "conversation:clear",
   DialogPickDirectory: "dialog:pickDirectory",
   TerminalLaunch: "terminal:launch",
   TerminalLaunchesList: "terminal:launches:list",
@@ -133,8 +122,6 @@ export type DesktopApi = {
   setProjectMeta: (request: ProjectMetaSetRequest) => Promise<ProjectMetaSetResult>;
   commitAndPush: (request: GitCommitRequest) => Promise<GitCommitResult>;
   getRemoteHistory: (projectPath: string) => Promise<GitRemoteHistoryResult>;
-  listConversation: (projectPath: string) => Promise<ConversationEntry[]>;
-  clearConversation: (projectPath: string) => Promise<{ ok: true }>;
   pickDirectory: () => Promise<PickDirectoryResult>;
   launchTerminal: (request: TerminalLaunchRequest) => Promise<TerminalLaunchResult>;
   listTerminalLaunches: () => Promise<TerminalLaunchListResult>;

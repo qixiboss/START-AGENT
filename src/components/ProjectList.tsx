@@ -25,6 +25,23 @@ type ProjectListProps = {
   onCommitPush: (project: ProjectItem) => void;
 };
 
+const formatLaunchTime = (timestamp: number): string => {
+  const deltaMs = Date.now() - timestamp;
+  const deltaMin = Math.floor(deltaMs / 60000);
+  if (deltaMin < 1) {
+    return "just now";
+  }
+  if (deltaMin < 60) {
+    return `${deltaMin}m ago`;
+  }
+  const deltaHour = Math.floor(deltaMin / 60);
+  if (deltaHour < 24) {
+    return `${deltaHour}h ago`;
+  }
+  const deltaDay = Math.floor(deltaHour / 24);
+  return `${deltaDay}d ago`;
+};
+
 export const ProjectList = memo(({
   collapsed,
   rootPath,
@@ -58,23 +75,6 @@ export const ProjectList = memo(({
 
   const selectedProject =
     projects.find((project) => project.path === selectedProjectPath) ?? null;
-
-  const formatLaunchTime = (timestamp: number): string => {
-    const deltaMs = Date.now() - timestamp;
-    const deltaMin = Math.floor(deltaMs / 60000);
-    if (deltaMin < 1) {
-      return "just now";
-    }
-    if (deltaMin < 60) {
-      return `${deltaMin}m ago`;
-    }
-    const deltaHour = Math.floor(deltaMin / 60);
-    if (deltaHour < 24) {
-      return `${deltaHour}h ago`;
-    }
-    const deltaDay = Math.floor(deltaHour / 24);
-    return `${deltaDay}d ago`;
-  };
 
   if (collapsed) {
     return (
