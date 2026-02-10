@@ -16,6 +16,12 @@ const fallbackApi: DesktopApi = {
     projects: [],
     rootPath: ""
   }),
+  getProjectHealth: async () => ({
+    ok: false,
+    message: "Electron preload API not available.",
+    generatedAt: Date.now(),
+    items: []
+  }),
   setProjectMeta: async () => ({ ok: false, message: "Electron preload API not available." }),
   commitAndPush: async () => ({
     ok: false,

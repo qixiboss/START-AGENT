@@ -12,6 +12,11 @@ import {
   GitRemoteHistoryResult,
   IpcChannels,
   ListProjectsResult,
+  ProjectHealthBuildStatus,
+  ProjectHealthItem,
+  ProjectHealthRequest,
+  ProjectHealthResult,
+  ProjectHealthRisk,
   ProjectItem,
   ProjectMeta,
   ProjectMetaSetRequest,
@@ -186,6 +191,8 @@ const normalizeStoredPreset = (value: unknown): StoredSessionPreset | null => {
 const sortCustomPresets = (presets: StoredSessionPreset[]): StoredSessionPreset[] => {
   return [...presets].sort((a, b) => b.updatedAt - a.updatedAt || a.name.localeCompare(b.name, "zh-CN"));
 };
+const HEALTH_BUILD_TIMEOUT_MS = 60_000;
+const HEALTH_CONCURRENCY = 3;
 
 let currentRootPath = process.env.PROJECT_ROOT || process.cwd();
 let settingsState: Settings = {
@@ -399,11 +406,43 @@ const setRootPath = async (nextPath: string): Promise<ListProjectsResult> => {
   return listProjects();
 };
 
-const runGit = async (args: string[], cwd: string): Promise<{ code: number; stdout: string; stderr: string }> => {
-  return new Promise((resolve, reject) => {
-    const child = spawn("git", args, { cwd, windowsHide: true });
+const runCommand = async (
+  command: string,
+  args: string[],
+  cwd: string,
+  timeoutMs?: number
+): Promise<{ code: number; stdout: string; stderr: string; timedOut: boolean }> => {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, { cwd, windowsHide: true });
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    const close = (result: { code: number; stdout: string; stderr: string; timedOut: boolean }): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timer) {
+        clearTimeout(timer);
+      }
+      resolve(result);
+    };
+    const timer =
+      timeoutMs && timeoutMs > 0
+        ? setTimeout(() => {
+            try {
+              child.kill();
+            } catch {
+              // Ignore kill race.
+            }
+            close({
+              code: 1,
+              stdout,
+              stderr: `${stderr}\nCommand timed out after ${timeoutMs}ms.`,
+              timedOut: true
+            });
+          }, timeoutMs)
+        : null;
 
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString();
@@ -411,11 +450,382 @@ const runGit = async (args: string[], cwd: string): Promise<{ code: number; stdo
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
     });
-    child.on("error", reject);
+    child.on("error", (error) => {
+      close({
+        code: 1,
+        stdout,
+        stderr: `${stderr}\n${error.message}`.trim(),
+        timedOut: false
+      });
+    });
     child.on("close", (code) => {
-      resolve({ code: code ?? 1, stdout, stderr });
+      close({ code: code ?? 1, stdout, stderr, timedOut: false });
     });
   });
+};
+
+const runGit = async (
+  args: string[],
+  cwd: string,
+  timeoutMs?: number
+): Promise<{ code: number; stdout: string; stderr: string; timedOut: boolean }> => {
+  return runCommand("git", args, cwd, timeoutMs);
+};
+
+type PackageManifest = {
+  scripts?: Record<string, unknown>;
+  dependencies?: Record<string, unknown>;
+  devDependencies?: Record<string, unknown>;
+  peerDependencies?: Record<string, unknown>;
+  optionalDependencies?: Record<string, unknown>;
+};
+
+type PackageManifestState = {
+  hasManifest: boolean;
+  manifest: PackageManifest | null;
+  parseError?: string;
+};
+
+const readPackageManifest = async (projectPath: string): Promise<PackageManifestState> => {
+  const manifestPath = path.join(projectPath, "package.json");
+  try {
+    const raw = await fs.readFile(manifestPath, "utf-8");
+    try {
+      const parsed = JSON.parse(raw) as PackageManifest;
+      return {
+        hasManifest: true,
+        manifest: parsed
+      };
+    } catch (error) {
+      return {
+        hasManifest: true,
+        manifest: null,
+        parseError: error instanceof Error ? error.message : "Failed to parse package.json."
+      };
+    }
+  } catch {
+    return {
+      hasManifest: false,
+      manifest: null
+    };
+  }
+};
+
+const countManifestDependencies = (manifest: PackageManifest): number => {
+  const buckets = [
+    manifest.dependencies,
+    manifest.devDependencies,
+    manifest.peerDependencies,
+    manifest.optionalDependencies
+  ];
+  return buckets.reduce((sum, bucket) => {
+    if (!bucket || typeof bucket !== "object") {
+      return sum;
+    }
+    return sum + Object.keys(bucket).length;
+  }, 0);
+};
+
+const hasFile = async (filePath: string): Promise<boolean> => {
+  try {
+    const stats = await fs.stat(filePath);
+    return stats.isFile();
+  } catch {
+    return false;
+  }
+};
+
+const detectBuildCommand = async (
+  projectPath: string
+): Promise<{ command: string; args: string[]; label: string }> => {
+  const [hasPnpmLock, hasYarnLock, hasBunLockb, hasBunLock] = await Promise.all([
+    hasFile(path.join(projectPath, "pnpm-lock.yaml")),
+    hasFile(path.join(projectPath, "yarn.lock")),
+    hasFile(path.join(projectPath, "bun.lockb")),
+    hasFile(path.join(projectPath, "bun.lock"))
+  ]);
+
+  if (hasPnpmLock) {
+    return {
+      command: "pnpm",
+      args: ["run", "build"],
+      label: "pnpm run build"
+    };
+  }
+  if (hasYarnLock) {
+    return {
+      command: "yarn",
+      args: ["build"],
+      label: "yarn build"
+    };
+  }
+  if (hasBunLockb || hasBunLock) {
+    return {
+      command: "bun",
+      args: ["run", "build"],
+      label: "bun run build"
+    };
+  }
+  return {
+    command: "npm",
+    args: ["run", "build", "--if-present"],
+    label: "npm run build --if-present"
+  };
+};
+
+const toOneLineMessage = (value: string, fallback: string): string => {
+  const firstLine =
+    value
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line.length > 0) ?? "";
+  if (!firstLine) {
+    return fallback;
+  }
+  return firstLine.length > 180 ? `${firstLine.slice(0, 177)}...` : firstLine;
+};
+
+const evaluateBuildHealth = async (
+  projectPath: string,
+  manifestState: PackageManifestState,
+  includeBuildCheck: boolean
+): Promise<{ buildStatus: ProjectHealthBuildStatus; buildMessage?: string }> => {
+  if (!manifestState.hasManifest) {
+    return {
+      buildStatus: "missing_manifest",
+      buildMessage: "No package.json"
+    };
+  }
+  if (!manifestState.manifest) {
+    return {
+      buildStatus: "unknown",
+      buildMessage: manifestState.parseError ?? "Invalid package.json"
+    };
+  }
+  const buildScript = manifestState.manifest.scripts?.build;
+  if (typeof buildScript !== "string" || buildScript.trim().length === 0) {
+    return {
+      buildStatus: "missing_script",
+      buildMessage: "No build script"
+    };
+  }
+  if (!includeBuildCheck) {
+    return {
+      buildStatus: "skipped",
+      buildMessage: "Build check skipped"
+    };
+  }
+
+  const buildCommand = await detectBuildCommand(projectPath);
+  const run = await runCommand(
+    buildCommand.command,
+    buildCommand.args,
+    projectPath,
+    HEALTH_BUILD_TIMEOUT_MS
+  );
+
+  if (run.code === 0) {
+    return {
+      buildStatus: "pass",
+      buildMessage: buildCommand.label
+    };
+  }
+
+  if (run.timedOut) {
+    return {
+      buildStatus: "fail",
+      buildMessage: `Build timed out (${Math.round(HEALTH_BUILD_TIMEOUT_MS / 1000)}s)`
+    };
+  }
+
+  return {
+    buildStatus: "fail",
+    buildMessage: toOneLineMessage(run.stderr || run.stdout, `Build failed (${buildCommand.label})`)
+  };
+};
+
+const calcProjectHealthScore = (payload: {
+  lastCommitAt: number | null;
+  uncommittedChanges: number | null;
+  dependencyCount: number | null;
+  buildStatus: ProjectHealthBuildStatus;
+}): number => {
+  let penalty = 0;
+
+  if (payload.lastCommitAt) {
+    const staleDays = (Date.now() - payload.lastCommitAt) / (24 * 60 * 60 * 1000);
+    if (staleDays > 14) {
+      penalty += Math.min(30, Math.floor((staleDays - 14) * 1.15) + 6);
+    }
+  } else {
+    penalty += 16;
+  }
+
+  if (payload.uncommittedChanges === null) {
+    penalty += 8;
+  } else {
+    penalty += Math.min(26, payload.uncommittedChanges * 2);
+  }
+
+  if (payload.dependencyCount === null) {
+    penalty += 6;
+  } else if (payload.dependencyCount > 40) {
+    penalty += Math.min(18, Math.floor((payload.dependencyCount - 40) / 8) + 4);
+  }
+
+  switch (payload.buildStatus) {
+    case "fail":
+      penalty += 28;
+      break;
+    case "missing_script":
+      penalty += 12;
+      break;
+    case "missing_manifest":
+      penalty += 10;
+      break;
+    case "unknown":
+      penalty += 8;
+      break;
+    case "skipped":
+      penalty += 6;
+      break;
+    case "pass":
+      break;
+  }
+
+  return Math.max(0, Math.min(100, Math.round(100 - penalty)));
+};
+
+const calcProjectRisk = (score: number): ProjectHealthRisk => {
+  if (score < 45) {
+    return "high";
+  }
+  if (score < 70) {
+    return "medium";
+  }
+  return "low";
+};
+
+const collectProjectHealth = async (
+  project: Pick<ProjectItem, "name" | "path">,
+  includeBuildCheck: boolean
+): Promise<ProjectHealthItem> => {
+  const [lastCommitResult, changesResult, manifestState] = await Promise.all([
+    runGit(["log", "-1", "--format=%ct"], project.path),
+    runGit(["status", "--porcelain"], project.path),
+    readPackageManifest(project.path)
+  ]);
+
+  const commitUnix = Number.parseInt(lastCommitResult.stdout.trim(), 10);
+  const lastCommitAt =
+    lastCommitResult.code === 0 && Number.isFinite(commitUnix) && commitUnix > 0
+      ? commitUnix * 1000
+      : null;
+
+  const uncommittedChanges =
+    changesResult.code === 0
+      ? changesResult.stdout
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter((line) => line.length > 0).length
+      : null;
+
+  const dependencyCount = manifestState.manifest ? countManifestDependencies(manifestState.manifest) : null;
+
+  const { buildStatus, buildMessage } = await evaluateBuildHealth(
+    project.path,
+    manifestState,
+    includeBuildCheck
+  );
+
+  const score = calcProjectHealthScore({
+    lastCommitAt,
+    uncommittedChanges,
+    dependencyCount,
+    buildStatus
+  });
+
+  return {
+    projectPath: project.path,
+    projectName: project.name,
+    lastCommitAt,
+    uncommittedChanges,
+    dependencyCount,
+    buildStatus,
+    buildMessage,
+    score,
+    riskLevel: calcProjectRisk(score)
+  };
+};
+
+const runWithConcurrency = async <T, U>(
+  entries: T[],
+  concurrency: number,
+  mapper: (entry: T) => Promise<U>
+): Promise<U[]> => {
+  if (entries.length === 0) {
+    return [];
+  }
+  const workerCount = Math.max(1, Math.min(concurrency, entries.length));
+  const results: U[] = new Array(entries.length);
+  let cursor = 0;
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (true) {
+        const index = cursor;
+        cursor += 1;
+        if (index >= entries.length) {
+          break;
+        }
+        results[index] = await mapper(entries[index]);
+      }
+    })
+  );
+
+  return results;
+};
+
+const getProjectHealth = async (request: ProjectHealthRequest = {}): Promise<ProjectHealthResult> => {
+  const generatedAt = Date.now();
+  try {
+    const listed = await listProjects();
+    if (!listed.ok) {
+      return {
+        ok: false,
+        generatedAt,
+        message: listed.message,
+        items: []
+      };
+    }
+
+    const normalizedPaths = (request.projectPaths ?? [])
+      .map((projectPath) => projectPath.trim())
+      .filter((projectPath) => projectPath.length > 0)
+      .map((projectPath) => path.resolve(projectPath));
+    const requestedPathSet = normalizedPaths.length > 0 ? new Set(normalizedPaths) : null;
+    const targets = requestedPathSet
+      ? listed.projects.filter((project) => requestedPathSet.has(path.resolve(project.path)))
+      : listed.projects;
+    const includeBuildCheck = request.includeBuildCheck !== false;
+
+    const items = await runWithConcurrency(targets, HEALTH_CONCURRENCY, (project) =>
+      collectProjectHealth(project, includeBuildCheck)
+    );
+
+    return {
+      ok: true,
+      generatedAt,
+      items
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      generatedAt,
+      message: error instanceof Error ? error.message : "Unknown project health scan error.",
+      items: []
+    };
+  }
 };
 
 const ensureGitOrigin = async (projectPath: string, githubUrl: string): Promise<string | undefined> => {
@@ -977,6 +1387,9 @@ const registerIpc = (mainWindow: BrowserWindow): void => {
   );
 
   ipcMain.handle(IpcChannels.ListProjects, async () => listProjects());
+  ipcMain.handle(IpcChannels.ProjectHealth, async (_event, payload?: ProjectHealthRequest) =>
+    getProjectHealth(payload ?? {})
+  );
 
   ipcMain.handle(IpcChannels.ProjectMetaSet, async (_event, payload: ProjectMetaSetRequest) =>
     setProjectMeta(payload)

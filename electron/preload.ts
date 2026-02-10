@@ -7,6 +7,8 @@ import {
   IpcChannels,
   ListProjectsResult,
   PickDirectoryResult,
+  ProjectHealthRequest,
+  ProjectHealthResult,
   ProjectMetaSetRequest,
   ProjectMetaSetResult,
   SessionPresetDeleteResult,
@@ -25,6 +27,8 @@ const api = {
   setRootPath: (path: string): Promise<ListProjectsResult> =>
     ipcRenderer.invoke(IpcChannels.RootSet, { path }),
   listProjects: (): Promise<ListProjectsResult> => ipcRenderer.invoke(IpcChannels.ListProjects),
+  getProjectHealth: (request?: ProjectHealthRequest): Promise<ProjectHealthResult> =>
+    ipcRenderer.invoke(IpcChannels.ProjectHealth, request ?? {}),
   setProjectMeta: (request: ProjectMetaSetRequest): Promise<ProjectMetaSetResult> =>
     ipcRenderer.invoke(IpcChannels.ProjectMetaSet, request),
   commitAndPush: (request: GitCommitRequest): Promise<GitCommitResult> =>

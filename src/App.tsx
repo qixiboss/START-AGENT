@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ProjectList } from "./components/ProjectList";
 import { TerminalTabs } from "./components/TerminalTabs";
 import { TerminalSessionPane } from "./components/TerminalSessionPane";
@@ -6,6 +6,7 @@ import { electronApi } from "./services/electronApi";
 import type {
   ConversationEntry,
   GitRemoteHistoryResult,
+  ProjectHealthItem,
   ProjectItem,
   SessionPreset,
   SessionPresetSaveRequest,
@@ -63,6 +64,10 @@ const parseContextFiles = (raw: string): string[] =>
 
 const App = (): JSX.Element => {
   const [projects, setProjects] = useState<ProjectItem[]>([]);
+  const [healthItems, setHealthItems] = useState<ProjectHealthItem[]>([]);
+  const [healthLoading, setHealthLoading] = useState<boolean>(false);
+  const [healthError, setHealthError] = useState<string | null>(null);
+  const [healthGeneratedAt, setHealthGeneratedAt] = useState<number | null>(null);
   const [rootPath, setRootPath] = useState<string>("Loading...");
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -83,6 +88,7 @@ const App = (): JSX.Element => {
   const [presetDraft, setPresetDraft] = useState<SessionPresetDraft>(() => createEmptyPresetDraft());
   const [presetSaving, setPresetSaving] = useState<boolean>(false);
   const [presetError, setPresetError] = useState<string | null>(null);
+  const healthRequestIdRef = useRef(0);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
     try {
       return window.localStorage.getItem(SIDEBAR_COLLAPSE_KEY) === "1";
@@ -95,6 +101,13 @@ const App = (): JSX.Element => {
     () => sessionPresets.find((preset) => preset.id === presetSelectionId) ?? null,
     [presetSelectionId, sessionPresets]
   );
+  const clearHealthState = useCallback(() => {
+    healthRequestIdRef.current += 1;
+    setHealthItems([]);
+    setHealthLoading(false);
+    setHealthError(null);
+    setHealthGeneratedAt(null);
+  }, []);
 
   const scanProjects = useCallback(async () => {
     setLoading(true);
@@ -108,21 +121,24 @@ const App = (): JSX.Element => {
       setRootPath(result.rootPath);
       if (!result.ok) {
         setProjects([]);
+        clearHealthState();
         setError(`Scan failed: ${result.message}`);
         setStatus("Scan failed");
         return;
       }
       setProjects(result.projects);
+      clearHealthState();
       setStatus(`Found ${result.projects.length} directories`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown scan error";
       setProjects([]);
+      clearHealthState();
       setError(`Scan failed: ${message}`);
       setStatus("Scan failed");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [clearHealthState]);
 
   const loadSessionPresets = useCallback(async () => {
     try {
@@ -184,18 +200,70 @@ const App = (): JSX.Element => {
       setRootPath(result.rootPath);
       if (!result.ok) {
         setProjects([]);
+        clearHealthState();
         setError(`Scan failed: ${result.message}`);
         setStatus("Scan failed");
         return;
       }
       setError(null);
       setProjects(result.projects);
+      clearHealthState();
       setStatus(`Root changed. Found ${result.projects.length} directories`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown directory selection error";
       setStatus(`Failed to change root: ${message}`);
     }
-  }, []);
+  }, [clearHealthState]);
+
+  const refreshProjectHealth = useCallback(async () => {
+    if (projects.length === 0) {
+      setHealthItems([]);
+      setHealthLoading(false);
+      setHealthError(null);
+      setHealthGeneratedAt(null);
+      setStatus("No projects available for health scan.");
+      return;
+    }
+
+    const requestId = healthRequestIdRef.current + 1;
+    healthRequestIdRef.current = requestId;
+    setHealthLoading(true);
+    setHealthError(null);
+    setStatus(`Checking health for ${projects.length} projects...`);
+
+    try {
+      const result = await withTimeout(
+        electronApi.getProjectHealth({
+          projectPaths: projects.map((project) => project.path),
+          includeBuildCheck: true
+        }),
+        180000,
+        "Project health scan timed out."
+      );
+      if (healthRequestIdRef.current !== requestId) {
+        return;
+      }
+      setHealthGeneratedAt(result.generatedAt);
+      setHealthItems(result.items);
+      if (!result.ok) {
+        setHealthError(result.message);
+        setStatus(`Health scan failed: ${result.message}`);
+        return;
+      }
+      setStatus(`Health scan complete (${result.items.length} projects).`);
+    } catch (error) {
+      if (healthRequestIdRef.current !== requestId) {
+        return;
+      }
+      const message = error instanceof Error ? error.message : "Unknown health scan error";
+      setHealthError(message);
+      setStatus(`Health scan failed: ${message}`);
+    } finally {
+      if (healthRequestIdRef.current === requestId) {
+        setHealthLoading(false);
+      }
+    }
+  }, [projects]);
 
   const launchTerminal = useCallback(async (project: ProjectItem, tool: ToolType) => {
     try {
@@ -563,10 +631,15 @@ const App = (): JSX.Element => {
         sessionPresets={sessionPresets}
         loading={loading}
         error={error}
+        healthItems={healthItems}
+        healthLoading={healthLoading}
+        healthError={healthError}
+        healthGeneratedAt={healthGeneratedAt}
         onToggleCollapse={() => setIsSidebarCollapsed((prev) => !prev)}
         onChooseFolder={() => void chooseFolder()}
         onRefresh={() => void scanProjects()}
         onManagePresets={openPresetManager}
+        onRefreshHealth={() => void refreshProjectHealth()}
         onLaunch={launchTerminal}
         onLaunchPreset={(project, presetId) => void launchPreset(project, presetId)}
         onEditNote={(project) => openEditor("note", project)}
