@@ -6,9 +6,7 @@ import type { TerminalSessionInputStateValue } from "../types/ipc";
 
 export type EmbeddedTerminalHandle = {
   focus: () => void;
-  clear: () => void;
   scrollToBottom: () => void;
-  copyVisible: () => Promise<void>;
 };
 
 type EmbeddedTerminalProps = {
@@ -93,38 +91,8 @@ const EmbeddedTerminal = forwardRef<EmbeddedTerminalHandle, EmbeddedTerminalProp
     focus: () => {
       terminalRef.current?.focus();
     },
-    clear: () => {
-      terminalRef.current?.clear();
-      terminalRef.current?.reset();
-      writtenContentRef.current = "";
-    },
     scrollToBottom: () => {
       terminalRef.current?.scrollToBottom();
-    },
-    copyVisible: async () => {
-      const terminal = terminalRef.current;
-      if (!terminal) {
-        return;
-      }
-      const buffer = terminal.buffer.active;
-      const lines: string[] = [];
-      const baseY = buffer.ydisp;
-      for (let i = 0; i < terminal.rows; i += 1) {
-        const line = buffer.getLine(baseY + i);
-        if (!line) {
-          continue;
-        }
-        lines.push(line.translateToString(true));
-      }
-      const text = lines.join("\n").trimEnd();
-      if (!text) {
-        return;
-      }
-      try {
-        await navigator.clipboard.writeText(text);
-      } catch {
-        // Ignore clipboard failures.
-      }
     }
   }), []);
 

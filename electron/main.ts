@@ -3,10 +3,19 @@ import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import crypto from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
+import { IPty, spawn as spawnPty } from "node-pty";
 import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import {
+  TerminalApprovalDecision,
+  TerminalApprovalRequest,
+  GitAddRequest,
+  GitAddResult,
   GitCommitRequest,
   GitCommitResult,
+  GitPullRequest,
+  GitPullResult,
+  GitUntrackedFilesResult,
+  GitBranchesResult,
   GitRemoteHistoryResult,
   IpcChannels,
   ListProjectsResult,
@@ -17,27 +26,63 @@ import {
   TerminalLaunchListResult,
   TerminalLaunchRecord,
   TerminalLaunchRequest,
-  TerminalLaunchResult
+  TerminalLaunchResult,
+  TerminalSessionInfo,
+  TerminalSessionSnapshot,
+  TerminalSessionStatus,
+  TerminalSessionInputState,
+  TerminalSessionStatusEvent,
+  SessionToolType,
+  TerminalSessionOutputChunk
 } from "../src/types/ipc.js";
 
 type Settings = {
   projectRoot?: string;
   projectMetaByPath: Record<string, ProjectMeta>;
   terminalLaunches: TerminalLaunchRecord[];
+  terminalSessionSnapshots: TerminalSessionSnapshot[];
+};
+
+type RuntimeSession = {
+  info: TerminalSessionInfo;
+  ptyProcess: IPty;
+  outputBuffer: string[];
+  allowDangerousForSession: boolean;
+  commandInputBuffer: string;
+  pendingInputChunks: string[];
+  isFlushingInput: boolean;
+  pendingApproval?: {
+    request: TerminalApprovalRequest;
+    data: string;
+  };
 };
 
 const SETTINGS_SAVE_DEBOUNCE_MS = 400;
 const TERMINAL_LAUNCH_MAX = 300;
+const SESSION_SNAPSHOT_MAX = 20;
+const SESSION_OUTPUT_LINE_MAX = 5000;
+const DANGEROUS_COMMAND_PATTERNS = [
+  /\brm\b(?=[^\n\r]*\s-(?:[^\n\r]*r[^\n\r]*f|[^\n\r]*f[^\n\r]*r))(?=[^\n\r]*\s\S+)/i,
+  /\bdel\b.+\s\/f\b/i,
+  /\brmdir\b.+\s\/s\b/i,
+  /\bformat\b\s+[a-z]:/i,
+  /\bgit\s+reset\s+--hard\b/i,
+  /\bgit\s+clean\b.+\s-f/i,
+  /\bshutdown\b/i
+];
 
 let currentRootPath = process.env.PROJECT_ROOT || process.cwd();
 let settingsState: Settings = {
   projectRoot: currentRootPath,
   projectMetaByPath: {},
-  terminalLaunches: []
+  terminalLaunches: [],
+  terminalSessionSnapshots: []
 };
 let saveTimer: NodeJS.Timeout | null = null;
 let saveInFlight: Promise<void> | null = null;
 let launchPruneTimer: NodeJS.Timeout | null = null;
+const runtimeSessions = new Map<string, RuntimeSession>();
+let mainWindowRef: BrowserWindow | null = null;
 
 const getSettingsPath = (): string => path.join(app.getPath("userData"), "settings.json");
 const getRuntimeLogPath = (): string => path.join(app.getPath("userData"), "runtime.log");
@@ -88,6 +133,57 @@ const sanitizeLaunches = (value: unknown): TerminalLaunchRecord[] => {
     .filter((item): item is TerminalLaunchRecord => item !== null)
     .sort((a, b) => b.createdAt - a.createdAt)
     .slice(0, TERMINAL_LAUNCH_MAX);
+};
+
+const sanitizeSessionStatus = (value: unknown): TerminalSessionStatus => {
+  if (value === "starting" || value === "running" || value === "exited" || value === "error") {
+    return value;
+  }
+  return "exited";
+};
+
+const sanitizeSessionSnapshots = (value: unknown): TerminalSessionSnapshot[] => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item): TerminalSessionSnapshot | null => {
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+      const candidate = item as Partial<TerminalSessionSnapshot>;
+      if (
+        typeof candidate.id !== "string" ||
+        typeof candidate.projectPath !== "string" ||
+        typeof candidate.projectName !== "string" ||
+        (candidate.tool !== "codex" && candidate.tool !== "claude" && candidate.tool !== "shell") ||
+        typeof candidate.command !== "string" ||
+        typeof candidate.createdAt !== "number" ||
+        typeof candidate.updatedAt !== "number" ||
+        typeof candidate.title !== "string"
+      ) {
+        return null;
+      }
+      return {
+        id: candidate.id,
+        projectPath: candidate.projectPath,
+        projectName: candidate.projectName,
+        tool: candidate.tool,
+        command: candidate.command,
+        createdAt: candidate.createdAt,
+        updatedAt: candidate.updatedAt,
+        status: sanitizeSessionStatus(candidate.status),
+        title: candidate.title,
+        outputPreview: Array.isArray(candidate.outputPreview)
+          ? candidate.outputPreview
+              .filter((line): line is string => typeof line === "string")
+              .slice(-120)
+          : []
+      };
+    })
+    .filter((item): item is TerminalSessionSnapshot => item !== null)
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, SESSION_SNAPSHOT_MAX);
 };
 
 const isReadableDirectory = async (dirPath: string): Promise<boolean> => {
@@ -144,13 +240,15 @@ const loadSettings = async (): Promise<Settings> => {
     return {
       projectRoot: parsed.projectRoot,
       projectMetaByPath: parsed.projectMetaByPath ?? {},
-      terminalLaunches: sanitizeLaunches(parsed.terminalLaunches)
+      terminalLaunches: sanitizeLaunches(parsed.terminalLaunches),
+      terminalSessionSnapshots: sanitizeSessionSnapshots(parsed.terminalSessionSnapshots)
     };
   } catch {
     return {
       projectRoot: undefined,
       projectMetaByPath: {},
-      terminalLaunches: []
+      terminalLaunches: [],
+      terminalSessionSnapshots: []
     };
   }
 };
@@ -163,6 +261,7 @@ const initRootPath = async (): Promise<void> => {
   }
   settingsState.projectRoot = currentRootPath;
   settingsState.terminalLaunches = sanitizeLaunches(settingsState.terminalLaunches);
+  settingsState.terminalSessionSnapshots = sanitizeSessionSnapshots(settingsState.terminalSessionSnapshots);
   await flushSettingsPersist();
 };
 
@@ -398,17 +497,6 @@ const commitAndPush = async (request: GitCommitRequest): Promise<GitCommitResult
     }
   }
 
-  const add = await runGit(["add", "."], request.projectPath);
-  if (add.code !== 0) {
-    return {
-      ok: false,
-      step: "add",
-      message: "git add failed.",
-      stdout: add.stdout,
-      stderr: add.stderr
-    };
-  }
-
   const commit = await runGit(["commit", "-m", message], request.projectPath);
   const commitOutput = `${commit.stdout}\n${commit.stderr}`.toLowerCase();
   const noChanges = commitOutput.includes("nothing to commit");
@@ -422,17 +510,29 @@ const commitAndPush = async (request: GitCommitRequest): Promise<GitCommitResult
     };
   }
 
-  let push = await runGit(["push"], request.projectPath);
-  if (push.code !== 0) {
-    const pushText = `${push.stdout}\n${push.stderr}`.toLowerCase();
-    const needsUpstream =
-      pushText.includes("no upstream branch") ||
-      pushText.includes("set-upstream") ||
-      pushText.includes("has no upstream");
-    if (needsUpstream) {
-      push = await runGit(["push", "--set-upstream", "origin", "HEAD"], request.projectPath);
-    }
+  const currentBranchResult = await runGit(["rev-parse", "--abbrev-ref", "HEAD"], request.projectPath);
+  if (currentBranchResult.code !== 0) {
+    return {
+      ok: false,
+      step: "push",
+      message: "Failed to resolve current branch.",
+      stdout: currentBranchResult.stdout,
+      stderr: currentBranchResult.stderr
+    };
   }
+  const currentBranch = currentBranchResult.stdout.trim();
+  const remoteBranch = (request.remoteBranch || currentBranch).trim();
+  if (!remoteBranch) {
+    return {
+      ok: false,
+      step: "validate",
+      message: "Remote branch is required.",
+      stdout: "",
+      stderr: ""
+    };
+  }
+
+  const push = await runGit(["push", "origin", `HEAD:${remoteBranch}`], request.projectPath);
   if (push.code !== 0) {
     return {
       ok: false,
@@ -447,10 +547,205 @@ const commitAndPush = async (request: GitCommitRequest): Promise<GitCommitResult
     ok: true,
     step: "push",
     message: noChanges
-      ? "No new changes to commit. Push completed for existing commits."
-      : "Commit and push completed.",
-    stdout: [add.stdout, commit.stdout, push.stdout].join("\n"),
-    stderr: [add.stderr, commit.stderr, push.stderr].join("\n")
+      ? `No new changes to commit. Push completed to origin/${remoteBranch}.`
+      : `Commit and push completed to origin/${remoteBranch}.`,
+    stdout: [commit.stdout, push.stdout].join("\n"),
+    stderr: [commit.stderr, push.stderr].join("\n")
+  };
+};
+
+const listGitUntrackedFiles = async (projectPath: string): Promise<GitUntrackedFilesResult> => {
+  const gitCheck = await runGit(["rev-parse", "--is-inside-work-tree"], projectPath);
+  if (gitCheck.code !== 0) {
+    return { ok: false, message: "Current project is not a git repository.", files: [] };
+  }
+
+  const statusResult = await runGit(["status", "--porcelain"], projectPath);
+  if (statusResult.code !== 0) {
+    return {
+      ok: false,
+      message: statusResult.stderr || "Failed to inspect git status.",
+      files: []
+    };
+  }
+
+  const files = statusResult.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line) => line.startsWith("?? "))
+    .map((line) => line.slice(3).trim())
+    .filter((line) => line.length > 0);
+
+  return { ok: true, files };
+};
+
+const gitAdd = async (request: GitAddRequest): Promise<GitAddResult> => {
+  const gitCheck = await runGit(["rev-parse", "--is-inside-work-tree"], request.projectPath);
+  if (gitCheck.code !== 0) {
+    return {
+      ok: false,
+      message: "Current project is not a git repository.",
+      stdout: gitCheck.stdout,
+      stderr: gitCheck.stderr
+    };
+  }
+
+  if (request.mode === "selected_new") {
+    const files = (request.files ?? []).map((item) => item.trim()).filter((item) => item.length > 0);
+    if (files.length === 0) {
+      return {
+        ok: false,
+        message: "Please select at least one file to add.",
+        stdout: "",
+        stderr: ""
+      };
+    }
+    const addResult = await runGit(["add", "--", ...files], request.projectPath);
+    if (addResult.code !== 0) {
+      return {
+        ok: false,
+        message: "git add selected files failed.",
+        stdout: addResult.stdout,
+        stderr: addResult.stderr
+      };
+    }
+    return {
+      ok: true,
+      message: `Added ${files.length} selected file(s).`,
+      addedFiles: files,
+      stdout: addResult.stdout,
+      stderr: addResult.stderr
+    };
+  }
+
+  const addAllResult = await runGit(["add", "."], request.projectPath);
+  if (addAllResult.code !== 0) {
+    return {
+      ok: false,
+      message: "git add . failed.",
+      stdout: addAllResult.stdout,
+      stderr: addAllResult.stderr
+    };
+  }
+  return {
+    ok: true,
+    message: "git add . completed.",
+    addedFiles: ["."],
+    stdout: addAllResult.stdout,
+    stderr: addAllResult.stderr
+  };
+};
+
+const gitPull = async (request: GitPullRequest): Promise<GitPullResult> => {
+  const gitCheck = await runGit(["rev-parse", "--is-inside-work-tree"], request.projectPath);
+  if (gitCheck.code !== 0) {
+    return {
+      ok: false,
+      message: "Current project is not a git repository.",
+      stdout: gitCheck.stdout,
+      stderr: gitCheck.stderr
+    };
+  }
+
+  const remoteCheck = await runGit(["remote", "get-url", "origin"], request.projectPath);
+  if (remoteCheck.code !== 0) {
+    const maybeGithubUrl = settingsState.projectMetaByPath[request.projectPath]?.githubUrl;
+    if (!maybeGithubUrl) {
+      return {
+        ok: false,
+        message: "No git remote origin found. Set GitHub URL first.",
+        stdout: remoteCheck.stdout,
+        stderr: remoteCheck.stderr
+      };
+    }
+    const warning = await ensureGitOrigin(request.projectPath, maybeGithubUrl);
+    if (warning) {
+      return {
+        ok: false,
+        message: `Failed to configure origin: ${warning}`,
+        stdout: "",
+        stderr: warning
+      };
+    }
+  }
+
+  const currentBranchResult = await runGit(["rev-parse", "--abbrev-ref", "HEAD"], request.projectPath);
+  if (currentBranchResult.code !== 0) {
+    return {
+      ok: false,
+      message: "Failed to resolve current branch.",
+      stdout: currentBranchResult.stdout,
+      stderr: currentBranchResult.stderr
+    };
+  }
+  const remoteBranch = (request.remoteBranch || currentBranchResult.stdout.trim()).trim();
+  if (!remoteBranch) {
+    return { ok: false, message: "Remote branch is required.", stdout: "", stderr: "" };
+  }
+
+  const pullResult = await runGit(["pull", "origin", remoteBranch], request.projectPath);
+  if (pullResult.code !== 0) {
+    return {
+      ok: false,
+      message: `git pull origin ${remoteBranch} failed.`,
+      stdout: pullResult.stdout,
+      stderr: pullResult.stderr
+    };
+  }
+  return {
+    ok: true,
+    message: `Pulled latest from origin/${remoteBranch}.`,
+    stdout: pullResult.stdout,
+    stderr: pullResult.stderr
+  };
+};
+
+const listGitBranches = async (projectPath: string): Promise<GitBranchesResult> => {
+  const gitCheck = await runGit(["rev-parse", "--is-inside-work-tree"], projectPath);
+  if (gitCheck.code !== 0) {
+    return { ok: false, message: "Current project is not a git repository.", currentBranch: "", branches: [] };
+  }
+
+  const currentBranchResult = await runGit(["rev-parse", "--abbrev-ref", "HEAD"], projectPath);
+  if (currentBranchResult.code !== 0) {
+    return {
+      ok: false,
+      message: currentBranchResult.stderr || "Failed to read current branch.",
+      currentBranch: "",
+      branches: []
+    };
+  }
+  const currentBranch = currentBranchResult.stdout.trim();
+
+  const remoteBranchesResult = await runGit(
+    ["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin"],
+    projectPath
+  );
+  if (remoteBranchesResult.code !== 0) {
+    return {
+      ok: false,
+      message: remoteBranchesResult.stderr || "Failed to list origin branches.",
+      currentBranch,
+      branches: [currentBranch].filter((item) => item.length > 0)
+    };
+  }
+  const remoteBranches = remoteBranchesResult.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && line !== "origin/HEAD")
+    .map((line) => (line.startsWith("origin/") ? line.slice("origin/".length) : line));
+
+  const branches = Array.from(new Set([currentBranch, ...remoteBranches])).filter((item) => item.length > 0);
+  branches.sort((a, b) => a.localeCompare(b));
+  if (currentBranch && branches.includes(currentBranch)) {
+    branches.splice(branches.indexOf(currentBranch), 1);
+    branches.unshift(currentBranch);
+  }
+
+  return {
+    ok: true,
+    currentBranch,
+    branches
   };
 };
 
@@ -866,7 +1161,434 @@ const launchTerminal = (request: TerminalLaunchRequest): TerminalLaunchResult =>
   }
 };
 
+const sendIpcEvent = <T,>(channel: string, payload: T): void => {
+  if (!mainWindowRef || mainWindowRef.isDestroyed()) {
+    return;
+  }
+  mainWindowRef.webContents.send(channel, payload);
+};
+
+const pushSessionOutput = (sessionId: string, stream: "stdout" | "stderr" | "system", data: string): void => {
+  const runtime = runtimeSessions.get(sessionId);
+  if (!runtime) {
+    return;
+  }
+  runtime.outputBuffer.push(...data.split(/\r?\n/));
+  if (runtime.outputBuffer.length > SESSION_OUTPUT_LINE_MAX) {
+    runtime.outputBuffer = runtime.outputBuffer.slice(-SESSION_OUTPUT_LINE_MAX);
+  }
+  const chunk: TerminalSessionOutputChunk = {
+    sessionId,
+    data,
+    stream,
+    timestamp: Date.now()
+  };
+  sendIpcEvent(IpcChannels.TerminalSessionOutputEvent, chunk);
+};
+
+const emitSessionStatus = (sessionId: string, status: TerminalSessionStatus, message?: string): void => {
+  const runtime = runtimeSessions.get(sessionId);
+  if (runtime) {
+    runtime.info.status = status;
+  }
+  const event: TerminalSessionStatusEvent = {
+    sessionId,
+    status,
+    message,
+    timestamp: Date.now()
+  };
+  sendIpcEvent(IpcChannels.TerminalSessionStatusEvent, event);
+};
+
+const emitInputState = (
+  sessionId: string,
+  state: TerminalSessionInputState["state"],
+  queueLength: number,
+  message?: string
+): void => {
+  const event: TerminalSessionInputState = {
+    sessionId,
+    state,
+    queueLength,
+    message,
+    timestamp: Date.now()
+  };
+  sendIpcEvent(IpcChannels.TerminalSessionInputStateEvent, event);
+};
+
+const flushSessionInputQueue = (sessionId: string): void => {
+  const runtime = runtimeSessions.get(sessionId);
+  if (!runtime || runtime.isFlushingInput) {
+    return;
+  }
+  runtime.isFlushingInput = true;
+  emitInputState(sessionId, "sending", runtime.pendingInputChunks.length);
+  try {
+    while (runtime.pendingInputChunks.length > 0) {
+      const nextChunk = runtime.pendingInputChunks.shift();
+      if (!nextChunk) {
+        continue;
+      }
+      runtime.ptyProcess.write(nextChunk);
+      emitInputState(sessionId, "sending", runtime.pendingInputChunks.length);
+    }
+    emitInputState(sessionId, "idle", 0);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to flush terminal input.";
+    emitInputState(sessionId, "error", runtime.pendingInputChunks.length, message);
+  } finally {
+    runtime.isFlushingInput = false;
+  }
+};
+
+const upsertSessionSnapshot = (info: TerminalSessionInfo, outputBuffer: string[]): void => {
+  const snapshot: TerminalSessionSnapshot = {
+    id: info.id,
+    projectPath: info.projectPath,
+    projectName: info.projectName,
+    tool: info.tool,
+    command: info.command,
+    createdAt: info.createdAt,
+    updatedAt: Date.now(),
+    status: info.status,
+    title: info.title,
+    outputPreview: outputBuffer.slice(-120)
+  };
+  const next = [
+    snapshot,
+    ...settingsState.terminalSessionSnapshots.filter((item) => item.id !== snapshot.id)
+  ].slice(0, SESSION_SNAPSHOT_MAX);
+  settingsState.terminalSessionSnapshots = next;
+  schedulePersistSettings();
+};
+
+const buildSessionBootstrapCommand = (tool: SessionToolType): string => {
+  const utf8Setup = [
+    "$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
+    "chcp 65001 > $null"
+  ].join("; ");
+  if (tool === "shell") {
+    return utf8Setup;
+  }
+  return `${utf8Setup}; if (Get-Command ${tool} -ErrorAction SilentlyContinue) { ${tool} } else { Write-Host "[ERROR] Command '${tool}' not found in PATH." }`;
+};
+
+const looksDangerousCommand = (data: string): boolean => {
+  const trimmed = data.trim();
+  if (!trimmed) {
+    return false;
+  }
+  return DANGEROUS_COMMAND_PATTERNS.some((pattern) => pattern.test(trimmed));
+};
+
+const applyForwardedInputToBuffer = (runtime: RuntimeSession, data: string): void => {
+  for (const char of data) {
+    if (char === "\r" || char === "\n") {
+      runtime.commandInputBuffer = "";
+    } else {
+      runtime.commandInputBuffer += char;
+    }
+  }
+};
+
+const analyzeInputForApproval = (
+  runtime: RuntimeSession,
+  data: string
+):
+  | { mode: "forward"; forwardData: string }
+  | {
+      mode: "block";
+      forwardData: string;
+      blockedData: string;
+      command: string;
+      nextCommandInputBuffer: string;
+    } => {
+  if (!data.includes("\r") && !data.includes("\n")) {
+    return { mode: "forward", forwardData: data };
+  }
+
+  const previousBuffer = runtime.commandInputBuffer;
+  let lineBuffer = previousBuffer;
+  let lineStartInChunk = 0;
+
+  for (let i = 0; i < data.length; i += 1) {
+    const char = data[i];
+    if (char === "\r" || char === "\n") {
+      const command = lineBuffer.trim();
+      if (looksDangerousCommand(command)) {
+        const forwardData = data.slice(0, lineStartInChunk);
+        const blockedData = data.slice(lineStartInChunk);
+        const nextCommandInputBuffer = lineStartInChunk === 0 ? previousBuffer : "";
+        return {
+          mode: "block",
+          forwardData,
+          blockedData,
+          command,
+          nextCommandInputBuffer
+        };
+      }
+      lineBuffer = "";
+      lineStartInChunk = i + 1;
+      continue;
+    }
+    lineBuffer += char;
+  }
+  return { mode: "forward", forwardData: data };
+};
+
+const createTerminalSession = (request: {
+  projectPath: string;
+  projectName: string;
+  tool: SessionToolType;
+}): { ok: true; session: TerminalSessionInfo } | { ok: false; message: string } => {
+  const powerShellPath = resolvePowerShellPath();
+  if (!powerShellPath) {
+    return {
+      ok: false,
+      message: "Windows PowerShell (powershell.exe) was not found. Check system PATH and restart the app."
+    };
+  }
+  if (!fsSync.existsSync(request.projectPath)) {
+    return { ok: false, message: `Project path not found: ${request.projectPath}` };
+  }
+
+  const command = buildSessionBootstrapCommand(request.tool);
+  const args = ["-NoLogo", "-NoExit"];
+  if (command) {
+    args.push("-Command", command);
+  }
+  const title = `${request.projectName} - ${request.tool}`;
+
+  try {
+    const ptyProcess = spawnPty(powerShellPath, args, {
+      name: "xterm-256color",
+      cols: 120,
+      rows: 30,
+      cwd: request.projectPath,
+      env: process.env as Record<string, string>,
+      useConpty: true
+    });
+    const session: TerminalSessionInfo = {
+      id: crypto.randomUUID(),
+      projectPath: request.projectPath,
+      projectName: request.projectName,
+      tool: request.tool,
+      command: command || "powershell",
+      createdAt: Date.now(),
+      processId: ptyProcess.pid,
+      status: "running",
+      title
+    };
+    const runtime: RuntimeSession = {
+      info: session,
+      ptyProcess,
+      outputBuffer: [],
+      allowDangerousForSession: false,
+      commandInputBuffer: "",
+      pendingInputChunks: [],
+      isFlushingInput: false
+    };
+    runtimeSessions.set(session.id, runtime);
+    upsertSessionSnapshot(session, runtime.outputBuffer);
+
+    emitSessionStatus(session.id, "running");
+    emitInputState(session.id, "idle", 0);
+    ptyProcess.onData((chunk: string) => {
+      pushSessionOutput(session.id, "stdout", chunk);
+      upsertSessionSnapshot(runtime.info, runtime.outputBuffer);
+    });
+    ptyProcess.onExit((event) => {
+      const runtimeEntry = runtimeSessions.get(session.id);
+      if (runtimeEntry) {
+        runtimeEntry.info.status = event.exitCode === 0 ? "exited" : "error";
+        pushSessionOutput(
+          session.id,
+          "system",
+          `\n[session closed] code=${event.exitCode} signal=${event.signal}\n`
+        );
+        emitSessionStatus(session.id, runtimeEntry.info.status);
+        emitInputState(
+          session.id,
+          runtimeEntry.info.status === "error" ? "error" : "idle",
+          runtimeEntry.pendingInputChunks.length
+        );
+        upsertSessionSnapshot(runtimeEntry.info, runtimeEntry.outputBuffer);
+      }
+      runtimeSessions.delete(session.id);
+    });
+
+    return { ok: true, session };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to start terminal session.";
+    return { ok: false, message };
+  }
+};
+
+const listTerminalSessions = (): { ok: true; sessions: TerminalSessionInfo[] } => {
+  const sessions = [...runtimeSessions.values()]
+    .map((item) => item.info)
+    .sort((a, b) => b.createdAt - a.createdAt);
+  return { ok: true, sessions };
+};
+
+const inputTerminalSession = (
+  sessionId: string,
+  data: string
+): { ok: true; accepted?: boolean; queueLength?: number } | { ok: false; message: string; code?: "APPROVAL_REQUIRED" } => {
+  const runtime = runtimeSessions.get(sessionId);
+  if (!runtime) {
+    return { ok: false, message: "Session not found." };
+  }
+  if (runtime.pendingApproval) {
+    emitInputState(sessionId, "blocked", 0, "Pending approval exists for this session.");
+    return { ok: false, message: "Pending approval exists for this session.", code: "APPROVAL_REQUIRED" };
+  }
+
+  if (runtime.allowDangerousForSession) {
+    runtime.pendingInputChunks.push(data);
+    applyForwardedInputToBuffer(runtime, data);
+    emitInputState(sessionId, "sending", runtime.pendingInputChunks.length);
+    flushSessionInputQueue(sessionId);
+    return { ok: true, accepted: true, queueLength: runtime.pendingInputChunks.length };
+  }
+
+  const inspection = analyzeInputForApproval(runtime, data);
+  if (inspection.mode === "block") {
+    if (inspection.forwardData) {
+      runtime.pendingInputChunks.push(inspection.forwardData);
+      applyForwardedInputToBuffer(runtime, inspection.forwardData);
+      flushSessionInputQueue(sessionId);
+    }
+    const request: TerminalApprovalRequest = {
+      requestId: crypto.randomUUID(),
+      sessionId,
+      command: inspection.command,
+      createdAt: Date.now()
+    };
+    runtime.commandInputBuffer = inspection.nextCommandInputBuffer;
+    runtime.pendingApproval = { request, data: inspection.blockedData };
+    sendIpcEvent(IpcChannels.TerminalApprovalRequiredEvent, request);
+    pushSessionOutput(sessionId, "system", `[approval required] ${request.command}\n`);
+    emitInputState(sessionId, "blocked", 0, "Approval required.");
+    return { ok: false, message: "Approval required.", code: "APPROVAL_REQUIRED" };
+  }
+
+  runtime.pendingInputChunks.push(inspection.forwardData);
+  applyForwardedInputToBuffer(runtime, inspection.forwardData);
+  emitInputState(sessionId, "sending", runtime.pendingInputChunks.length);
+  flushSessionInputQueue(sessionId);
+  return { ok: true, accepted: true, queueLength: runtime.pendingInputChunks.length };
+};
+
+const submitTerminalApproval = (
+  sessionId: string,
+  requestId: string,
+  decision: TerminalApprovalDecision
+): { ok: true } | { ok: false; message: string } => {
+  const runtime = runtimeSessions.get(sessionId);
+  if (!runtime || !runtime.pendingApproval) {
+    return { ok: false, message: "No pending approval for this session." };
+  }
+  if (runtime.pendingApproval.request.requestId !== requestId) {
+    return { ok: false, message: "Approval request id mismatch." };
+  }
+  const pending = runtime.pendingApproval;
+  runtime.pendingApproval = undefined;
+
+  if (decision === "deny") {
+    pushSessionOutput(sessionId, "system", "[blocked] command denied by approval policy.\n");
+    emitInputState(sessionId, "idle", 0, "Command denied by approval policy.");
+    return { ok: true };
+  }
+  if (decision === "allow_session") {
+    runtime.allowDangerousForSession = true;
+  }
+  runtime.pendingInputChunks.push(pending.data);
+  applyForwardedInputToBuffer(runtime, pending.data);
+  emitInputState(sessionId, "sending", runtime.pendingInputChunks.length, "Approval granted.");
+  flushSessionInputQueue(sessionId);
+  pushSessionOutput(sessionId, "system", "[approved] command sent.\n");
+  return { ok: true };
+};
+
+const closeTerminalSession = (
+  sessionId: string,
+  force: boolean
+): { ok: true } | { ok: false; message: string } => {
+  const runtime = runtimeSessions.get(sessionId);
+  if (!runtime) {
+    return { ok: false, message: "Session not found." };
+  }
+
+  try {
+    if (runtime.info.processId) {
+      const killed = closeTerminalProcess(runtime.info.processId);
+      if (!killed.ok && force) {
+        return { ok: false, message: killed.message };
+      }
+      if (!killed.ok) {
+        runtime.ptyProcess.kill();
+      }
+    } else {
+      runtime.ptyProcess.kill();
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to terminate session.";
+    return { ok: false, message };
+  }
+
+  runtime.info.status = "exited";
+  upsertSessionSnapshot(runtime.info, runtime.outputBuffer);
+  runtimeSessions.delete(sessionId);
+  emitSessionStatus(sessionId, "exited");
+  emitInputState(sessionId, "idle", 0);
+  return { ok: true };
+};
+
+const resizeTerminalSession = (
+  sessionId: string,
+  cols: number,
+  rows: number
+): { ok: true } | { ok: false; message: string } => {
+  const runtime = runtimeSessions.get(sessionId);
+  if (!runtime) {
+    return { ok: false, message: "Session not found." };
+  }
+  if (!Number.isFinite(cols) || !Number.isFinite(rows) || cols < 20 || rows < 5) {
+    return { ok: false, message: "Invalid terminal size." };
+  }
+  try {
+    runtime.ptyProcess.resize(Math.floor(cols), Math.floor(rows));
+    return { ok: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to resize terminal.";
+    return { ok: false, message };
+  }
+};
+
+const listTerminalSessionSnapshots = (): { ok: true; snapshots: TerminalSessionSnapshot[] } => {
+  return {
+    ok: true,
+    snapshots: [...settingsState.terminalSessionSnapshots].sort((a, b) => b.updatedAt - a.updatedAt)
+  };
+};
+
+const closeAllRuntimeSessions = (): void => {
+  for (const [sessionId, runtime] of runtimeSessions.entries()) {
+    if (runtime.info.processId) {
+      closeTerminalProcess(runtime.info.processId);
+    } else {
+      runtime.ptyProcess.kill();
+    }
+    runtime.info.status = "exited";
+    upsertSessionSnapshot(runtime.info, runtime.outputBuffer);
+    emitInputState(sessionId, "idle", 0);
+    runtimeSessions.delete(sessionId);
+  }
+};
+
 const registerIpc = (mainWindow: BrowserWindow): void => {
+  mainWindowRef = mainWindow;
   ipcMain.handle(IpcChannels.RootGet, async () => ({ rootPath: currentRootPath }));
 
   ipcMain.handle(IpcChannels.RootSet, async (_event, payload: { path: string }) =>
@@ -885,6 +1607,22 @@ const registerIpc = (mainWindow: BrowserWindow): void => {
 
   ipcMain.handle(IpcChannels.GitRemoteHistory, async (_event, payload: { projectPath: string }) =>
     getRemoteHistory(payload.projectPath)
+  );
+
+  ipcMain.handle(IpcChannels.GitBranches, async (_event, payload: { projectPath: string }) =>
+    listGitBranches(payload.projectPath)
+  );
+
+  ipcMain.handle(IpcChannels.GitAdd, async (_event, payload: GitAddRequest) =>
+    gitAdd(payload)
+  );
+
+  ipcMain.handle(IpcChannels.GitPull, async (_event, payload: GitPullRequest) =>
+    gitPull(payload)
+  );
+
+  ipcMain.handle(IpcChannels.GitUntrackedFiles, async (_event, payload: { projectPath: string }) =>
+    listGitUntrackedFiles(payload.projectPath)
   );
 
   ipcMain.handle(IpcChannels.DialogPickDirectory, async () => {
@@ -930,6 +1668,42 @@ const registerIpc = (mainWindow: BrowserWindow): void => {
       removeTerminalLaunch(payload.recordId)
   );
 
+  ipcMain.handle(
+    IpcChannels.TerminalSessionCreate,
+    async (_event, payload: { projectPath: string; projectName: string; tool: SessionToolType }) =>
+      createTerminalSession(payload)
+  );
+
+  ipcMain.handle(
+    IpcChannels.TerminalSessionInput,
+    async (_event, payload: { sessionId: string; data: string }) =>
+      inputTerminalSession(payload.sessionId, payload.data)
+  );
+
+  ipcMain.handle(
+    IpcChannels.TerminalSessionResize,
+    async (_event, payload: { sessionId: string; cols: number; rows: number }) =>
+      resizeTerminalSession(payload.sessionId, payload.cols, payload.rows)
+  );
+
+  ipcMain.handle(
+    IpcChannels.TerminalSessionClose,
+    async (_event, payload: { sessionId: string; force?: boolean }) =>
+      closeTerminalSession(payload.sessionId, !!payload.force)
+  );
+
+  ipcMain.handle(IpcChannels.TerminalSessionList, async () => listTerminalSessions());
+
+  ipcMain.handle(IpcChannels.TerminalSessionRestoreList, async () => listTerminalSessionSnapshots());
+
+  ipcMain.handle(
+    IpcChannels.TerminalApprovalSubmit,
+    async (
+      _event,
+      payload: { sessionId: string; requestId: string; decision: TerminalApprovalDecision }
+    ) => submitTerminalApproval(payload.sessionId, payload.requestId, payload.decision)
+  );
+
   ipcMain.handle(IpcChannels.WindowMinimize, async () => {
     mainWindow.minimize();
     return { ok: true };
@@ -962,7 +1736,7 @@ app.whenReady().then(async () => {
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      createMainWindow();
+      mainWindowRef = createMainWindow();
     }
   });
 });
@@ -972,6 +1746,7 @@ app.on("window-all-closed", () => {
     clearInterval(launchPruneTimer);
     launchPruneTimer = null;
   }
+  closeAllRuntimeSessions();
   try {
     persistSettingsSync();
   } catch {
@@ -983,6 +1758,7 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  closeAllRuntimeSessions();
   try {
     persistSettingsSync();
   } catch {

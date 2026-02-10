@@ -232,7 +232,7 @@ export const ProjectList = memo(({
                 GitHub
               </button>
               <button className="btn secondary" onClick={() => onCommitPush(selectedProject)}>
-                Commit+Push
+                Git Flow
               </button>
             </div>
           </>
