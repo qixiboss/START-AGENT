@@ -16,36 +16,30 @@ export type ListProjectsResult =
 
 export type ToolType = "codex" | "claude";
 
-export type TerminalCreateRequest = {
+export type TerminalLaunchRequest = {
   projectPath: string;
+  projectName: string;
   tool: ToolType;
 };
 
-export type TerminalSessionInfo = {
+export type TerminalLaunchRecord = {
   id: string;
   projectPath: string;
+  projectName: string;
   tool: ToolType;
-  title: string;
+  command: string;
+  createdAt: number;
+  processId?: number;
+  note?: string;
 };
 
-export type TerminalCreateResult =
-  | { ok: true; session: TerminalSessionInfo }
-  | { ok: false; message: string };
+export type TerminalLaunchResult =
+  | { ok: true; record: TerminalLaunchRecord }
+  | { ok: false; message: string; code?: "POWERSHELL_NOT_FOUND" | "LAUNCH_FAILED" };
 
-export type TerminalDataEvent = {
-  sessionId: string;
-  chunk: string;
-};
-
-export type TerminalExitEvent = {
-  sessionId: string;
-  code: number;
-};
-
-export type TerminalErrorEvent = {
-  sessionId: string;
-  message: string;
-};
+export type TerminalLaunchListResult =
+  | { ok: true; launches: TerminalLaunchRecord[] }
+  | { ok: false; message: string; launches: TerminalLaunchRecord[] };
 
 export type ConversationEntry = {
   id: string;
@@ -125,13 +119,11 @@ export const IpcChannels = {
   ConversationList: "conversation:list",
   ConversationClear: "conversation:clear",
   DialogPickDirectory: "dialog:pickDirectory",
-  TerminalCreate: "terminal:create",
-  TerminalWrite: "terminal:write",
-  TerminalResize: "terminal:resize",
-  TerminalClose: "terminal:close",
-  TerminalData: "terminal:data",
-  TerminalExit: "terminal:exit",
-  TerminalError: "terminal:error"
+  TerminalLaunch: "terminal:launch",
+  TerminalLaunchesList: "terminal:launches:list",
+  TerminalLaunchesFocus: "terminal:launches:focus",
+  TerminalLaunchesNoteSet: "terminal:launches:note:set",
+  TerminalLaunchesRemove: "terminal:launches:remove"
 } as const;
 
 export type DesktopApi = {
@@ -144,11 +136,12 @@ export type DesktopApi = {
   listConversation: (projectPath: string) => Promise<ConversationEntry[]>;
   clearConversation: (projectPath: string) => Promise<{ ok: true }>;
   pickDirectory: () => Promise<PickDirectoryResult>;
-  createTerminal: (request: TerminalCreateRequest) => Promise<TerminalCreateResult>;
-  writeTerminal: (sessionId: string, data: string) => void;
-  resizeTerminal: (sessionId: string, cols: number, rows: number) => void;
-  closeTerminal: (sessionId: string) => void;
-  onTerminalData: (handler: (event: TerminalDataEvent) => void) => () => void;
-  onTerminalExit: (handler: (event: TerminalExitEvent) => void) => () => void;
-  onTerminalError: (handler: (event: TerminalErrorEvent) => void) => () => void;
+  launchTerminal: (request: TerminalLaunchRequest) => Promise<TerminalLaunchResult>;
+  listTerminalLaunches: () => Promise<TerminalLaunchListResult>;
+  focusTerminalLaunch: (recordId: string) => Promise<{ ok: true } | { ok: false; message: string }>;
+  setTerminalLaunchNote: (
+    recordId: string,
+    note: string
+  ) => Promise<{ ok: true; record: TerminalLaunchRecord } | { ok: false; message: string }>;
+  removeTerminalLaunch: (recordId: string) => Promise<{ ok: true } | { ok: false; message: string }>;
 };

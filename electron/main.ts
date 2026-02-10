@@ -2,9 +2,8 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import crypto from "node:crypto";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { app, BrowserWindow, dialog, ipcMain } from "electron";
-import * as pty from "node-pty";
 import {
   ConversationEntry,
   GitCommitRequest,
@@ -16,38 +15,32 @@ import {
   ProjectMeta,
   ProjectMetaSetRequest,
   ProjectMetaSetResult,
-  TerminalCreateRequest,
-  TerminalCreateResult,
-  TerminalErrorEvent,
-  TerminalExitEvent
+  TerminalLaunchListResult,
+  TerminalLaunchRecord,
+  TerminalLaunchRequest,
+  TerminalLaunchResult
 } from "../src/types/ipc.js";
-
-type TerminalSession = {
-  id: string;
-  ptyProcess: pty.IPty;
-  projectPath: string;
-  tool: "codex" | "claude";
-};
 
 type Settings = {
   projectRoot?: string;
   projectMetaByPath: Record<string, ProjectMeta>;
   conversationByPath: Record<string, ConversationEntry[]>;
+  terminalLaunches: TerminalLaunchRecord[];
 };
 
-const sessions = new Map<string, TerminalSession>();
-const inputBuffers = new Map<string, string>();
 const SETTINGS_SAVE_DEBOUNCE_MS = 400;
-const CONVERSATION_MAX_PER_PROJECT = 800;
+const TERMINAL_LAUNCH_MAX = 300;
 
 let currentRootPath = process.env.PROJECT_ROOT || process.cwd();
 let settingsState: Settings = {
   projectRoot: currentRootPath,
   projectMetaByPath: {},
-  conversationByPath: {}
+  conversationByPath: {},
+  terminalLaunches: []
 };
 let saveTimer: NodeJS.Timeout | null = null;
 let saveInFlight: Promise<void> | null = null;
+let launchPruneTimer: NodeJS.Timeout | null = null;
 
 const getSettingsPath = (): string => path.join(app.getPath("userData"), "settings.json");
 const getRuntimeLogPath = (): string => path.join(app.getPath("userData"), "runtime.log");
@@ -59,6 +52,45 @@ const appendRuntimeLog = (message: string): void => {
   } catch {
     // Ignore logging failures.
   }
+};
+
+const sanitizeLaunches = (value: unknown): TerminalLaunchRecord[] => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item): TerminalLaunchRecord | null => {
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+      const candidate = item as Partial<TerminalLaunchRecord>;
+      if (
+        typeof candidate.id !== "string" ||
+        typeof candidate.projectPath !== "string" ||
+        typeof candidate.projectName !== "string" ||
+        (candidate.tool !== "codex" && candidate.tool !== "claude") ||
+        typeof candidate.command !== "string" ||
+        typeof candidate.createdAt !== "number"
+      ) {
+        return null;
+      }
+      return {
+        id: candidate.id,
+        projectPath: candidate.projectPath,
+        projectName: candidate.projectName,
+        tool: candidate.tool,
+        command: candidate.command,
+        createdAt: candidate.createdAt,
+        processId:
+          typeof candidate.processId === "number" && Number.isFinite(candidate.processId)
+            ? candidate.processId
+            : undefined,
+        note: typeof candidate.note === "string" ? candidate.note : undefined
+      };
+    })
+    .filter((item): item is TerminalLaunchRecord => item !== null)
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, TERMINAL_LAUNCH_MAX);
 };
 
 const isReadableDirectory = async (dirPath: string): Promise<boolean> => {
@@ -115,13 +147,15 @@ const loadSettings = async (): Promise<Settings> => {
     return {
       projectRoot: parsed.projectRoot,
       projectMetaByPath: parsed.projectMetaByPath ?? {},
-      conversationByPath: parsed.conversationByPath ?? {}
+      conversationByPath: parsed.conversationByPath ?? {},
+      terminalLaunches: sanitizeLaunches(parsed.terminalLaunches)
     };
   } catch {
     return {
       projectRoot: undefined,
       projectMetaByPath: {},
-      conversationByPath: {}
+      conversationByPath: {},
+      terminalLaunches: []
     };
   }
 };
@@ -133,6 +167,7 @@ const initRootPath = async (): Promise<void> => {
     currentRootPath = candidate;
   }
   settingsState.projectRoot = currentRootPath;
+  settingsState.terminalLaunches = sanitizeLaunches(settingsState.terminalLaunches);
   await flushSettingsPersist();
 };
 
@@ -516,133 +551,321 @@ const getRemoteHistory = async (projectPath: string): Promise<GitRemoteHistoryRe
   };
 };
 
-const appendConversationInput = (
-  projectPath: string,
-  tool: "codex" | "claude",
-  sessionId: string,
-  input: string
-): void => {
-  const cleaned = input.trim();
-  if (!cleaned) {
-    return;
-  }
-  const line = cleaned
-    .replace(/\x1b\[[0-9;]*[A-Za-z]/g, "")
-    .replace(/\u0008/g, "")
-    .trim();
-  if (!line) {
-    return;
-  }
-  const arr = settingsState.conversationByPath[projectPath] ?? [];
-  arr.push({
-    id: crypto.randomUUID(),
-    projectPath,
-    tool,
-    sessionId,
-    input: line,
-    createdAt: Date.now()
-  });
-  if (arr.length > CONVERSATION_MAX_PER_PROJECT) {
-    arr.splice(0, arr.length - CONVERSATION_MAX_PER_PROJECT);
-  }
-  settingsState.conversationByPath[projectPath] = arr;
-  schedulePersistSettings();
-};
-
-const processTerminalInputCapture = (session: TerminalSession, data: string): void => {
-  const prevBuffer = inputBuffers.get(session.id) ?? "";
-  const merged = prevBuffer + data;
-  const normalized = merged.replace(/\r/g, "\n");
-  const lines = normalized.split("\n");
-  const complete = lines.slice(0, -1);
-  const rest = lines[lines.length - 1] ?? "";
-  for (const line of complete) {
-    appendConversationInput(session.projectPath, session.tool, session.id, line);
-  }
-  inputBuffers.set(session.id, rest);
-};
-
-const emitTerminalError = (window: BrowserWindow, payload: TerminalErrorEvent): void => {
-  safeSendToRenderer(window, IpcChannels.TerminalError, payload);
-};
-
-const emitTerminalExit = (window: BrowserWindow, payload: TerminalExitEvent): void => {
-  safeSendToRenderer(window, IpcChannels.TerminalExit, payload);
-};
-
-const safeSendToRenderer = (
-  window: BrowserWindow,
-  channel: string,
-  payload: unknown
-): void => {
-  if (window.isDestroyed()) {
-    return;
-  }
-  const { webContents } = window;
-  if (webContents.isDestroyed()) {
-    return;
-  }
-  try {
-    webContents.send(channel, payload);
-  } catch {
-    // Ignore races where renderer was torn down between checks.
-  }
-};
-
-const buildLaunchCommand = (tool: "codex" | "claude"): string => {
+const buildToolBootstrapCommand = (tool: "codex" | "claude"): string => {
   return `if (Get-Command ${tool} -ErrorAction SilentlyContinue) { ${tool} } else { Write-Host "[ERROR] Command '${tool}' not found in PATH." }`;
 };
 
-const createTerminalSession = (
-  mainWindow: BrowserWindow,
-  request: TerminalCreateRequest
-): TerminalCreateResult => {
-  const sessionId = crypto.randomUUID();
+const isProcessAlive = (pid: number): boolean => {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
   try {
-    if (typeof pty.spawn !== "function") {
-      return { ok: false, message: "node-pty failed to load: spawn is unavailable." };
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (
+      error &&
+      typeof error === "object" &&
+      "code" in error &&
+      (error as { code?: string }).code === "ESRCH"
+    ) {
+      return false;
+    }
+    return true;
+  }
+};
+
+const resolvePowerShellCandidates = (): string[] => {
+  const candidates: string[] = [];
+
+  const systemRoot = process.env.SystemRoot || process.env.WINDIR;
+  if (systemRoot) {
+    candidates.push(path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"));
+  }
+
+  const whereResult = spawnSync("where", ["powershell.exe"], {
+    windowsHide: true,
+    encoding: "utf-8"
+  });
+  if (whereResult.status === 0 && whereResult.stdout) {
+    for (const line of whereResult.stdout.split(/\r?\n/)) {
+      const resolved = line.trim();
+      if (resolved.length > 0) {
+        candidates.push(resolved);
+      }
+    }
+  }
+
+  candidates.push("powershell.exe");
+
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const item of candidates) {
+    const key = process.platform === "win32" ? item.toLowerCase() : item;
+    if (!seen.has(key)) {
+      seen.add(key);
+      normalized.push(item);
+    }
+  }
+  return normalized;
+};
+
+const probePowerShellCommand = (candidate: string): { ok: boolean; reason?: string } => {
+  const result = spawnSync(
+    candidate,
+    ["-NoLogo", "-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"],
+    {
+    windowsHide: true,
+    encoding: "utf-8",
+    timeout: 2500
+    }
+  );
+  if (result.error) {
+    return { ok: false, reason: result.error.message };
+  }
+  if (typeof result.status === "number") {
+    return { ok: true };
+  }
+  return {
+    ok: false,
+    reason: `signal=${result.signal ?? "unknown"}`
+  };
+};
+
+const resolvePowerShellPath = (): string | null => {
+  const candidates = resolvePowerShellCandidates();
+  const probeLogs: string[] = [];
+  for (const candidate of candidates) {
+    if (candidate !== "powershell.exe" && !fsSync.existsSync(candidate)) {
+      probeLogs.push(`${candidate} => missing`);
+      continue;
+    }
+    const probe = probePowerShellCommand(candidate);
+    if (probe.ok) {
+      appendRuntimeLog(`powershell resolved via '${candidate}'`);
+      return candidate;
+    }
+    probeLogs.push(`${candidate} => ${probe.reason ?? "probe failed"}`);
+  }
+  appendRuntimeLog(`powershell resolution failed. probes: ${probeLogs.join(" | ")}`);
+  return null;
+};
+
+const listTerminalLaunches = (): TerminalLaunchListResult => {
+  return {
+    ok: true,
+    launches: [...settingsState.terminalLaunches].sort((a, b) => b.createdAt - a.createdAt)
+  };
+};
+
+const focusTerminalLaunch = (recordId: string): { ok: true } | { ok: false; message: string } => {
+  const record = settingsState.terminalLaunches.find((item) => item.id === recordId);
+  if (!record) {
+    return { ok: false, message: "Launch record not found." };
+  }
+  if (!record.processId || !Number.isInteger(record.processId)) {
+    return { ok: false, message: "This launch record has no process id." };
+  }
+  if (!isProcessAlive(record.processId)) {
+    settingsState.terminalLaunches = settingsState.terminalLaunches.filter((item) => item.id !== recordId);
+    schedulePersistSettings();
+    return { ok: false, message: "Terminal process has already exited." };
+  }
+
+  const powerShellPath = resolvePowerShellPath();
+  if (!powerShellPath) {
+    return { ok: false, message: "Windows PowerShell is unavailable for AppActivate." };
+  }
+  const focusScript = [
+    "$shell = New-Object -ComObject WScript.Shell",
+    `$ok = $shell.AppActivate(${record.processId})`,
+    "if ($ok) { exit 0 }",
+    "exit 2"
+  ].join("; ");
+  const result = spawnSync(powerShellPath, ["-NoLogo", "-NoProfile", "-Command", focusScript], {
+    windowsHide: true,
+    encoding: "utf-8",
+    timeout: 2500
+  });
+  if (result.error) {
+    return { ok: false, message: `Failed to focus terminal: ${result.error.message}` };
+  }
+  if (result.status !== 0) {
+    return { ok: false, message: "Failed to bring terminal window to front." };
+  }
+  return { ok: true };
+};
+
+const closeTerminalProcess = (pid: number): { ok: true } | { ok: false; message: string } => {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return { ok: false, message: "Invalid terminal process id." };
+  }
+  const result = spawnSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
+    windowsHide: true,
+    encoding: "utf-8",
+    timeout: 5000
+  });
+  if (result.error) {
+    return { ok: false, message: result.error.message };
+  }
+  if (result.status !== 0) {
+    const stderrText = (result.stderr || result.stdout || "").trim();
+    const lower = stderrText.toLowerCase();
+    if (
+      lower.includes("not found") ||
+      lower.includes("no running instance") ||
+      lower.includes("not running")
+    ) {
+      return { ok: true };
+    }
+    return { ok: false, message: stderrText || "taskkill failed." };
+  }
+  return { ok: true };
+};
+
+const removeTerminalLaunch = (recordId: string): { ok: true } | { ok: false; message: string } => {
+  const record = settingsState.terminalLaunches.find((item) => item.id === recordId);
+  if (!record) {
+    return { ok: false, message: "Launch record not found." };
+  }
+  if (record.processId && isProcessAlive(record.processId)) {
+    const killResult = closeTerminalProcess(record.processId);
+    if (!killResult.ok) {
+      return { ok: false, message: `Failed to close terminal: ${killResult.message}` };
+    }
+  }
+  settingsState.terminalLaunches = settingsState.terminalLaunches.filter((item) => item.id !== recordId);
+  schedulePersistSettings();
+  return { ok: true };
+};
+
+const setTerminalLaunchNote = (
+  recordId: string,
+  note: string
+): { ok: true; record: TerminalLaunchRecord } | { ok: false; message: string } => {
+  const index = settingsState.terminalLaunches.findIndex((item) => item.id === recordId);
+  if (index < 0) {
+    return { ok: false, message: "Launch record not found." };
+  }
+  const normalizedNote = note.trim();
+  const updated: TerminalLaunchRecord = {
+    ...settingsState.terminalLaunches[index],
+    note: normalizedNote.length > 0 ? normalizedNote : undefined
+  };
+  settingsState.terminalLaunches[index] = updated;
+  schedulePersistSettings();
+  return { ok: true, record: updated };
+};
+
+const pruneClosedLaunches = (): void => {
+  const prevLength = settingsState.terminalLaunches.length;
+  settingsState.terminalLaunches = settingsState.terminalLaunches.filter((item) => {
+    if (!item.processId) {
+      return true;
+    }
+    return isProcessAlive(item.processId);
+  });
+  if (settingsState.terminalLaunches.length !== prevLength) {
+    schedulePersistSettings();
+  }
+};
+
+const launchPowerShellWindow = (
+  powerShellPath: string,
+  projectPath: string,
+  encodedCommand: string
+): { ok: true; pid: number } | { ok: false; message: string } => {
+  const escapedExe = powerShellPath.replace(/'/g, "''");
+  const escapedCwd = projectPath.replace(/'/g, "''");
+  const launchScript = [
+    `$argList = @('-NoLogo','-NoExit','-EncodedCommand','${encodedCommand}')`,
+    `$p = Start-Process -FilePath '${escapedExe}' -WorkingDirectory '${escapedCwd}' -ArgumentList $argList -PassThru`,
+    "$p.Id"
+  ].join("; ");
+  const result = spawnSync(powerShellPath, ["-NoLogo", "-NoProfile", "-Command", launchScript], {
+    windowsHide: true,
+    encoding: "utf-8",
+    timeout: 5000
+  });
+  if (result.error) {
+    return { ok: false, message: result.error.message };
+  }
+  if (result.status !== 0) {
+    const stderrText = (result.stderr || result.stdout || "").trim();
+    return { ok: false, message: stderrText || "Start-Process failed." };
+  }
+  const pidText = (result.stdout || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => /^\d+$/.test(line));
+  if (!pidText) {
+    return { ok: false, message: "Could not read started process id." };
+  }
+  const pid = Number(pidText);
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return { ok: false, message: "Invalid started process id." };
+  }
+  return { ok: true, pid };
+};
+
+const launchTerminal = (request: TerminalLaunchRequest): TerminalLaunchResult => {
+  const powerShellPath = resolvePowerShellPath();
+  if (!powerShellPath) {
+    return {
+      ok: false,
+      code: "POWERSHELL_NOT_FOUND",
+      message:
+        "Windows PowerShell (powershell.exe) was not found. Check system PATH and restart the app."
+    };
+  }
+
+  const escapedTitle = `${request.projectName} - ${request.tool}`.replace(/'/g, "''");
+  const command = `$Host.UI.RawUI.WindowTitle='${escapedTitle}'; ${buildToolBootstrapCommand(request.tool)}`;
+  const encodedCommand = Buffer.from(command, "utf16le").toString("base64");
+
+  try {
+    const launchResult = launchPowerShellWindow(powerShellPath, request.projectPath, encodedCommand);
+    if (!launchResult.ok) {
+      return {
+        ok: false,
+        code: "LAUNCH_FAILED",
+        message: `Failed to start Windows PowerShell process: ${launchResult.message}`
+      };
     }
 
-    const ptyProcess = pty.spawn("powershell.exe", ["-NoLogo"], {
-      cwd: request.projectPath,
-      env: process.env as Record<string, string>,
-      cols: 120,
-      rows: 30
-    });
+    const inheritedNote =
+      settingsState.terminalLaunches.find(
+        (item) =>
+          item.projectPath === request.projectPath &&
+          item.tool === request.tool &&
+          typeof item.note === "string" &&
+          item.note.trim().length > 0
+      )?.note ?? undefined;
 
-    ptyProcess.onData((chunk) => {
-      safeSendToRenderer(mainWindow, IpcChannels.TerminalData, { sessionId, chunk });
-    });
-
-    ptyProcess.onExit((event) => {
-      sessions.delete(sessionId);
-      inputBuffers.delete(sessionId);
-      emitTerminalExit(mainWindow, { sessionId, code: event.exitCode });
-    });
-
-    const session: TerminalSession = {
-      id: sessionId,
-      ptyProcess,
+    const record: TerminalLaunchRecord = {
+      id: crypto.randomUUID(),
       projectPath: request.projectPath,
-      tool: request.tool
+      projectName: request.projectName,
+      tool: request.tool,
+      command: command,
+      createdAt: Date.now(),
+      processId: launchResult.pid,
+      note: inheritedNote
     };
-    sessions.set(sessionId, session);
-    inputBuffers.set(sessionId, "");
-    ptyProcess.write(`${buildLaunchCommand(request.tool)}\r`);
-
-    return {
-      ok: true,
-      session: {
-        id: sessionId,
-        projectPath: request.projectPath,
-        tool: request.tool,
-        title: `${path.basename(request.projectPath)} - ${request.tool}`
-      }
-    };
+    settingsState.terminalLaunches = [record, ...settingsState.terminalLaunches].slice(
+      0,
+      TERMINAL_LAUNCH_MAX
+    );
+    schedulePersistSettings();
+    return { ok: true, record };
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to create terminal";
-    emitTerminalError(mainWindow, { sessionId, message });
-    return { ok: false, message };
+    const message = error instanceof Error ? error.message : "Unknown launch failure.";
+    appendRuntimeLog(`powershell launch failed: ${message}`);
+    return {
+      ok: false,
+      code: "LAUNCH_FAILED",
+      message: `Failed to launch Windows PowerShell: ${message}`
+    };
   }
 };
 
@@ -690,50 +913,43 @@ const registerIpc = (mainWindow: BrowserWindow): void => {
   });
 
   ipcMain.handle(
-    IpcChannels.TerminalCreate,
-    async (_event, request: TerminalCreateRequest): Promise<TerminalCreateResult> =>
-      createTerminalSession(mainWindow, request)
+    IpcChannels.TerminalLaunch,
+    async (_event, request: TerminalLaunchRequest): Promise<TerminalLaunchResult> =>
+      launchTerminal(request)
   );
 
-  ipcMain.on(IpcChannels.TerminalWrite, (_event, payload: { sessionId: string; data: string }) => {
-    const session = sessions.get(payload.sessionId);
-    if (!session) {
-      return;
-    }
-    processTerminalInputCapture(session, payload.data);
-    session.ptyProcess.write(payload.data);
-  });
-
-  ipcMain.on(
-    IpcChannels.TerminalResize,
-    (_event, payload: { sessionId: string; cols: number; rows: number }) => {
-      const session = sessions.get(payload.sessionId);
-      if (!session) {
-        return;
-      }
-      try {
-        session.ptyProcess.resize(payload.cols, payload.rows);
-      } catch {
-        // Ignore occasional resize race while terminal is closing.
-      }
-    }
+  ipcMain.handle(
+    IpcChannels.TerminalLaunchesList,
+    async (): Promise<TerminalLaunchListResult> => listTerminalLaunches()
   );
 
-  ipcMain.on(IpcChannels.TerminalClose, (_event, payload: { sessionId: string }) => {
-    const session = sessions.get(payload.sessionId);
-    if (!session) {
-      return;
-    }
-    sessions.delete(payload.sessionId);
-    inputBuffers.delete(payload.sessionId);
-    session.ptyProcess.kill();
-  });
+  ipcMain.handle(
+    IpcChannels.TerminalLaunchesFocus,
+    async (_event, payload: { recordId: string }): Promise<{ ok: true } | { ok: false; message: string }> =>
+      focusTerminalLaunch(payload.recordId)
+  );
+
+  ipcMain.handle(
+    IpcChannels.TerminalLaunchesNoteSet,
+    async (
+      _event,
+      payload: { recordId: string; note: string }
+    ): Promise<{ ok: true; record: TerminalLaunchRecord } | { ok: false; message: string }> =>
+      setTerminalLaunchNote(payload.recordId, payload.note)
+  );
+
+  ipcMain.handle(
+    IpcChannels.TerminalLaunchesRemove,
+    async (_event, payload: { recordId: string }): Promise<{ ok: true } | { ok: false; message: string }> =>
+      removeTerminalLaunch(payload.recordId)
+  );
 };
 
 app.whenReady().then(async () => {
   await initRootPath();
   const mainWindow = createMainWindow();
   registerIpc(mainWindow);
+  launchPruneTimer = setInterval(pruneClosedLaunches, 3000);
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -743,10 +959,10 @@ app.whenReady().then(async () => {
 });
 
 app.on("window-all-closed", () => {
-  for (const session of sessions.values()) {
-    session.ptyProcess.kill();
+  if (launchPruneTimer) {
+    clearInterval(launchPruneTimer);
+    launchPruneTimer = null;
   }
-  sessions.clear();
   try {
     persistSettingsSync();
   } catch {

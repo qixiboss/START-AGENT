@@ -2,9 +2,10 @@
   "name": "start-agent-manager",
   "version": "0.1.0",
   "private": true,
-  "description": "Windows project manager for launching Codex or Claude in embedded terminals.",
+  "description": "Windows project manager for launching Codex or Claude in external Windows PowerShell windows.",
   "main": "dist-electron/electron/main.js",
   "scripts": {
+    "postinstall": "electron-builder install-app-deps",
     "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:electron:tsc\" \"npm:dev:electron\"",
     "dev:renderer": "vite",
     "dev:electron:tsc": "tsc -p tsconfig.electron.json --watch --preserveWatchOutput",
@@ -15,11 +16,8 @@
     "dist:win": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win nsis"
   },
   "dependencies": {
-    "node-pty": "^1.1.0-beta34",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "xterm": "^5.3.0",
-    "xterm-addon-fit": "^0.8.0"
+    "react-dom": "^18.3.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
@@ -38,9 +36,6 @@
     "appId": "com.startagent.manager",
     "productName": "START-AGENT Manager",
     "asar": true,
-    "asarUnpack": [
-      "node_modules/node-pty/**/*"
-    ],
     "files": [
       "dist/**/*",
       "dist-electron/**/*",

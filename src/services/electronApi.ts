@@ -28,13 +28,15 @@ const fallbackApi: DesktopApi = {
   listConversation: async () => [],
   clearConversation: async () => ({ ok: true }),
   pickDirectory: async () => ({ ok: false, cancelled: true }),
-  createTerminal: async () => ({ ok: false, message: "Electron preload API not available." }),
-  writeTerminal: () => {},
-  resizeTerminal: () => {},
-  closeTerminal: () => {},
-  onTerminalData: () => () => {},
-  onTerminalExit: () => () => {},
-  onTerminalError: () => () => {}
+  launchTerminal: async () => ({ ok: false, message: "Electron preload API not available." }),
+  listTerminalLaunches: async () => ({
+    ok: false,
+    message: "Electron preload API not available.",
+    launches: []
+  }),
+  focusTerminalLaunch: async () => ({ ok: false, message: "Electron preload API not available." }),
+  setTerminalLaunchNote: async () => ({ ok: false, message: "Electron preload API not available." }),
+  removeTerminalLaunch: async () => ({ ok: false, message: "Electron preload API not available." })
 };
 
 export const electronApi: DesktopApi = api ?? fallbackApi;
