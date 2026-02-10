@@ -38,3 +38,5 @@ Installer output:
 - The project root defaults to the current working directory (`process.cwd()`).
 - You can override root with environment variable: `PROJECT_ROOT`.
 - Each project card has two actions: `Open Codex` and `Open Claude`.
+- Session Presets support one-click launch with saved model/system prompt/start command/context files.
+- Built-in presets: `代码审查`, `Bug 修复`, `需求拆解` (custom presets can be created in `Session Presets` modal).

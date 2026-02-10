@@ -1,3 +1,5 @@
+import { memo } from "react";
+import type { ProjectItem, SessionPreset, ToolType } from "../types/ipc";
 import { memo, useEffect, useMemo, useState } from "react";
 import type { ProjectHealthItem, ProjectItem, ToolType } from "../types/ipc";
 
@@ -5,6 +7,7 @@ type ProjectListProps = {
   collapsed: boolean;
   rootPath: string;
   projects: ProjectItem[];
+  sessionPresets: SessionPreset[];
   loading: boolean;
   error: string | null;
   healthItems: ProjectHealthItem[];
@@ -14,8 +17,10 @@ type ProjectListProps = {
   onToggleCollapse: () => void;
   onChooseFolder: () => void;
   onRefresh: () => void;
+  onManagePresets: () => void;
   onRefreshHealth: () => void;
   onLaunch: (project: ProjectItem, tool: ToolType) => void;
+  onLaunchPreset: (project: ProjectItem, presetId: string) => void;
   onEditNote: (project: ProjectItem) => void;
   onEditGithub: (project: ProjectItem) => void;
   onCommitPush: (project: ProjectItem) => void;
@@ -24,7 +29,9 @@ type ProjectListProps = {
 
 type ProjectCardProps = {
   project: ProjectItem;
+  sessionPresets: SessionPreset[];
   onLaunch: (project: ProjectItem, tool: ToolType) => void;
+  onLaunchPreset: (project: ProjectItem, presetId: string) => void;
   onEditNote: (project: ProjectItem) => void;
   onEditGithub: (project: ProjectItem) => void;
   onCommitPush: (project: ProjectItem) => void;
@@ -124,7 +131,9 @@ ActionRows.displayName = "ActionRows";
 const ProjectCard = memo(
   ({
     project,
+    sessionPresets,
     onLaunch,
+    onLaunchPreset,
     onEditNote,
     onEditGithub,
     onCommitPush,
@@ -177,6 +186,36 @@ const ProjectHealthCard = memo(
             <strong>{health.score}</strong>
           </div>
         </div>
+        {sessionPresets.length > 0 ? (
+          <>
+            <div className="preset-label">Session Presets</div>
+            <div className="preset-actions">
+              {sessionPresets.map((preset) => (
+                <button
+                  key={preset.id}
+                  className={`btn secondary preset-btn ${preset.readonly ? "builtin" : "custom"}`}
+                  title={preset.systemPrompt || `Launch with ${preset.name}`}
+                  onClick={() => onLaunchPreset(project, preset.id)}
+                >
+                  {preset.name}
+                </button>
+              ))}
+            </div>
+          </>
+        ) : null}
+        <div className="actions">
+          <button className="btn secondary" onClick={() => onEditNote(project)}>
+            Note
+          </button>
+          <button className="btn secondary" onClick={() => onEditGithub(project)}>
+            GitHub
+          </button>
+          <button className="btn secondary" onClick={() => onCommitPush(project)}>
+            Commit+Push
+          </button>
+          <button className="btn secondary" onClick={() => onViewConversation(project)}>
+            Conversation
+          </button>
 
         <div className="health-metric-grid">
           <div className="health-metric">
@@ -230,6 +269,7 @@ export const ProjectList = memo(({
   collapsed,
   rootPath,
   projects,
+  sessionPresets,
   loading,
   error,
   healthItems,
@@ -239,8 +279,10 @@ export const ProjectList = memo(({
   onToggleCollapse,
   onChooseFolder,
   onRefresh,
+  onManagePresets,
   onRefreshHealth,
   onLaunch,
+  onLaunchPreset,
   onEditNote,
   onEditGithub,
   onCommitPush,
@@ -338,11 +380,32 @@ export const ProjectList = memo(({
           <button className="btn secondary" onClick={onRefresh} disabled={loading}>
             {loading ? "Scanning..." : "Refresh"}
           </button>
+          <button className="btn secondary" onClick={onManagePresets}>
+            Session Presets
+          </button>
         </div>
       </header>
 
       {error ? <div className="error-box">{error}</div> : null}
 
+      {!error && projects.length === 0 && !loading ? (
+        <div className="empty">No project directories found in root.</div>
+      ) : null}
+
+      <div className="project-grid">
+        {projects.map((project) => (
+          <ProjectCard
+            key={project.path}
+            project={project}
+            sessionPresets={sessionPresets}
+            onLaunch={onLaunch}
+            onLaunchPreset={onLaunchPreset}
+            onEditNote={onEditNote}
+            onEditGithub={onEditGithub}
+            onCommitPush={onCommitPush}
+            onViewConversation={onViewConversation}
+          />
+        ))}
       <div className="project-view-toolbar">
         <div className="view-switch">
           <button

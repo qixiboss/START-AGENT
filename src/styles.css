@@ -331,6 +331,32 @@ body {
   flex-wrap: wrap;
 }
 
+.preset-label {
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: 0.2px;
+}
+
+.preset-actions {
+  margin-top: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.preset-btn {
+  padding: 5px 9px;
+}
+
+.preset-btn.builtin {
+  border-color: rgba(111, 224, 175, 0.48);
+}
+
+.preset-btn.custom {
+  border-color: rgba(253, 209, 112, 0.48);
+}
+
 .btn {
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -589,6 +615,11 @@ body {
   width: min(640px, 92vw);
 }
 
+.preset-modal {
+  width: min(1080px, 94vw);
+  max-height: 84vh;
+}
+
 .modal-header {
   display: flex;
   align-items: center;
@@ -638,6 +669,71 @@ body {
   padding: 12px;
 }
 
+.preset-manager {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  min-height: 0;
+  gap: 0;
+}
+
+.preset-list {
+  border-right: 1px solid var(--line);
+  overflow: auto;
+  padding: 10px;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.preset-item {
+  border: 1px solid var(--line);
+  background: rgba(15, 26, 44, 0.78);
+  border-radius: 10px;
+  color: var(--text);
+  padding: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color var(--motion-fast), background var(--motion-fast), transform var(--motion-fast);
+}
+
+.preset-item:hover {
+  border-color: var(--line-strong);
+  transform: translateY(-1px);
+}
+
+.preset-item.active {
+  border-color: rgba(140, 200, 255, 0.75);
+  background: rgba(22, 43, 74, 0.8);
+}
+
+.preset-item-name {
+  font-size: 13px;
+}
+
+.preset-editor {
+  overflow: auto;
+  padding: 12px;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+}
+
+.field-label {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.preset-editor-actions {
+  display: flex;
+  gap: 8px;
+}
+
 .editor-input {
   width: 100%;
   border: 1px solid var(--line);
@@ -652,6 +748,10 @@ body {
   min-height: 180px;
   resize: vertical;
   font-family: inherit;
+}
+
+.editor-input.multiline.short {
+  min-height: 110px;
 }
 
 .remote-history {
@@ -746,6 +846,14 @@ body {
     padding: 6px 11px;
   }
 
+  .preset-manager {
+    grid-template-columns: 1fr;
+  }
+
+  .preset-list {
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+    max-height: 180px;
   .health-toolbar {
     flex-direction: column;
     align-items: stretch;

@@ -33,6 +33,13 @@ const fallbackApi: DesktopApi = {
   getRemoteHistory: async () => ({ ok: false, message: "Electron preload API not available." }),
   listConversation: async () => [],
   clearConversation: async () => ({ ok: true }),
+  listSessionPresets: async () => ({
+    ok: false,
+    message: "Electron preload API not available.",
+    presets: []
+  }),
+  saveSessionPreset: async () => ({ ok: false, message: "Electron preload API not available." }),
+  deleteSessionPreset: async () => ({ ok: false, message: "Electron preload API not available." }),
   pickDirectory: async () => ({ ok: false, cancelled: true }),
   createTerminal: async () => ({ ok: false, message: "Electron preload API not available." }),
   writeTerminal: () => {},
