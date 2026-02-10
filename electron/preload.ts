@@ -3,6 +3,7 @@ import {
   ConversationEntry,
   GitCommitRequest,
   GitCommitResult,
+  GitRemoteHistoryResult,
   IpcChannels,
   ListProjectsResult,
   PickDirectoryResult,
@@ -24,6 +25,8 @@ const api = {
     ipcRenderer.invoke(IpcChannels.ProjectMetaSet, request),
   commitAndPush: (request: GitCommitRequest): Promise<GitCommitResult> =>
     ipcRenderer.invoke(IpcChannels.GitCommitAndPush, request),
+  getRemoteHistory: (projectPath: string): Promise<GitRemoteHistoryResult> =>
+    ipcRenderer.invoke(IpcChannels.GitRemoteHistory, { projectPath }),
   listConversation: (projectPath: string): Promise<ConversationEntry[]> =>
     ipcRenderer.invoke(IpcChannels.ConversationList, { projectPath }),
   clearConversation: (projectPath: string): Promise<{ ok: true }> =>

@@ -8,6 +8,7 @@ import {
   ConversationEntry,
   GitCommitRequest,
   GitCommitResult,
+  GitRemoteHistoryResult,
   IpcChannels,
   ListProjectsResult,
   ProjectItem,
@@ -370,6 +371,100 @@ const commitAndPush = async (request: GitCommitRequest): Promise<GitCommitResult
   };
 };
 
+const getRemoteHistory = async (projectPath: string): Promise<GitRemoteHistoryResult> => {
+  const gitCheck = await runGit(["rev-parse", "--is-inside-work-tree"], projectPath);
+  if (gitCheck.code !== 0) {
+    return { ok: false, message: "Current project is not a git repository." };
+  }
+
+  const remoteCheck = await runGit(["remote", "get-url", "origin"], projectPath);
+  if (remoteCheck.code !== 0) {
+    const maybeGithubUrl = settingsState.projectMetaByPath[projectPath]?.githubUrl;
+    if (!maybeGithubUrl) {
+      return { ok: false, message: "No git remote origin found. Set GitHub URL first." };
+    }
+    const warning = await ensureGitOrigin(projectPath, maybeGithubUrl);
+    if (warning) {
+      return { ok: false, message: `Failed to configure origin: ${warning}` };
+    }
+  }
+
+  await runGit(["fetch", "origin", "--prune"], projectPath);
+
+  const branch = await runGit(["rev-parse", "--abbrev-ref", "HEAD"], projectPath);
+  if (branch.code !== 0) {
+    return { ok: false, message: branch.stderr || "Failed to read current branch." };
+  }
+  const branchName = branch.stdout.trim();
+  const upstreamRefResult = await runGit(
+    ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+    projectPath
+  );
+  const upstreamRef =
+    upstreamRefResult.code === 0 && upstreamRefResult.stdout.trim()
+      ? upstreamRefResult.stdout.trim()
+      : `origin/${branchName}`;
+
+  const localHeadResult = await runGit(["rev-parse", "HEAD"], projectPath);
+  const remoteHeadResult = await runGit(["rev-parse", upstreamRef], projectPath);
+  if (localHeadResult.code !== 0 || remoteHeadResult.code !== 0) {
+    return {
+      ok: false,
+      message:
+        remoteHeadResult.stderr ||
+        localHeadResult.stderr ||
+        `Failed to read heads for upstream ${upstreamRef}.`
+    };
+  }
+  const localHead = localHeadResult.stdout.trim();
+  const remoteHead = remoteHeadResult.stdout.trim();
+  const isUpToDate = localHead === remoteHead;
+  const statusResult = await runGit(["status", "--porcelain"], projectPath);
+  if (statusResult.code !== 0) {
+    return { ok: false, message: statusResult.stderr || "Failed to inspect local changes." };
+  }
+  const hasLocalChanges = statusResult.stdout.trim().length > 0;
+
+  const log = await runGit(
+    [
+      "log",
+      "--pretty=format:%H%x09%h%x09%an%x09%ad%x09%s",
+      "--date=iso",
+      "-n",
+      "20",
+      upstreamRef
+    ],
+    projectPath
+  );
+  if (log.code !== 0) {
+    return { ok: false, message: log.stderr || "Failed to load remote history." };
+  }
+
+  const commits = log.stdout
+    .split(/\r?\n/)
+    .filter((line) => line.trim().length > 0)
+    .map((line) => {
+      const [hash, shortHash, author, date, ...rest] = line.split("\t");
+      return {
+        hash,
+        shortHash,
+        author,
+        date,
+        subject: rest.join("\t")
+      };
+    });
+
+  return {
+    ok: true,
+    upstreamRef,
+    localHead,
+    remoteHead,
+    isUpToDate,
+    hasLocalChanges,
+    commits
+  };
+};
+
 const appendConversationInput = (
   projectPath: string,
   tool: "codex" | "claude",
@@ -496,6 +591,10 @@ const registerIpc = (mainWindow: BrowserWindow): void => {
 
   ipcMain.handle(IpcChannels.GitCommitAndPush, async (_event, payload: GitCommitRequest) =>
     commitAndPush(payload)
+  );
+
+  ipcMain.handle(IpcChannels.GitRemoteHistory, async (_event, payload: { projectPath: string }) =>
+    getRemoteHistory(payload.projectPath)
   );
 
   ipcMain.handle(IpcChannels.ConversationList, async (_event, payload: { projectPath: string }) => {

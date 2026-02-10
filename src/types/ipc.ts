@@ -71,6 +71,29 @@ export type GitCommitRequest = {
   message: string;
 };
 
+export type RemoteCommitEntry = {
+  hash: string;
+  shortHash: string;
+  author: string;
+  date: string;
+  subject: string;
+};
+
+export type GitRemoteHistoryResult =
+  | {
+      ok: true;
+      upstreamRef: string;
+      localHead: string;
+      remoteHead: string;
+      isUpToDate: boolean;
+      hasLocalChanges: boolean;
+      commits: RemoteCommitEntry[];
+    }
+  | {
+      ok: false;
+      message: string;
+    };
+
 export type GitCommitResult =
   | {
       ok: true;
@@ -98,6 +121,7 @@ export const IpcChannels = {
   ListProjects: "projects:list",
   ProjectMetaSet: "projectMeta:set",
   GitCommitAndPush: "git:commitAndPush",
+  GitRemoteHistory: "git:remoteHistory",
   ConversationList: "conversation:list",
   ConversationClear: "conversation:clear",
   DialogPickDirectory: "dialog:pickDirectory",
@@ -116,6 +140,7 @@ export type DesktopApi = {
   listProjects: () => Promise<ListProjectsResult>;
   setProjectMeta: (request: ProjectMetaSetRequest) => Promise<ProjectMetaSetResult>;
   commitAndPush: (request: GitCommitRequest) => Promise<GitCommitResult>;
+  getRemoteHistory: (projectPath: string) => Promise<GitRemoteHistoryResult>;
   listConversation: (projectPath: string) => Promise<ConversationEntry[]>;
   clearConversation: (projectPath: string) => Promise<{ ok: true }>;
   pickDirectory: () => Promise<PickDirectoryResult>;

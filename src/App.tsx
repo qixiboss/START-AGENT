@@ -3,7 +3,13 @@ import { ProjectList } from "./components/ProjectList";
 import { TerminalTabs } from "./components/TerminalTabs";
 import { TerminalSessionPane } from "./components/TerminalSessionPane";
 import { electronApi } from "./services/electronApi";
-import type { ConversationEntry, ProjectItem, TerminalSessionInfo, ToolType } from "./types/ipc";
+import type {
+  ConversationEntry,
+  GitRemoteHistoryResult,
+  ProjectItem,
+  TerminalSessionInfo,
+  ToolType
+} from "./types/ipc";
 
 type TerminalLayoutMode = "tabs" | "vertical" | "horizontal" | "grid";
 type EditorMode = "note" | "github" | "commit";
@@ -32,6 +38,8 @@ const App = (): JSX.Element => {
   const [editorMode, setEditorMode] = useState<EditorMode | null>(null);
   const [editorProject, setEditorProject] = useState<ProjectItem | null>(null);
   const [editorValue, setEditorValue] = useState<string>("");
+  const [remoteHistory, setRemoteHistory] = useState<GitRemoteHistoryResult | null>(null);
+  const [remoteHistoryLoading, setRemoteHistoryLoading] = useState<boolean>(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
     try {
       return window.localStorage.getItem(SIDEBAR_COLLAPSE_KEY) === "1";
@@ -165,13 +173,60 @@ const App = (): JSX.Element => {
     setEditorValue(
       mode === "note" ? project.meta?.note ?? "" : mode === "github" ? project.meta?.githubUrl ?? "" : ""
     );
+    setRemoteHistory(null);
+    if (mode === "commit") {
+      void (async () => {
+        setRemoteHistoryLoading(true);
+        try {
+          const result = await electronApi.getRemoteHistory(project.path);
+          setRemoteHistory(result);
+          if (!result.ok) {
+            setStatus(`Remote history failed: ${result.message}`);
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown remote history error";
+          setRemoteHistory({ ok: false, message });
+          setStatus(`Remote history failed: ${message}`);
+        } finally {
+          setRemoteHistoryLoading(false);
+        }
+      })();
+    }
   }, []);
 
   const closeEditor = useCallback(() => {
     setEditorMode(null);
     setEditorProject(null);
     setEditorValue("");
+    setRemoteHistory(null);
+    setRemoteHistoryLoading(false);
   }, []);
+
+  const loadRemoteHistory = useCallback(async () => {
+    if (!editorProject) {
+      return;
+    }
+    setRemoteHistoryLoading(true);
+    try {
+      const result = await electronApi.getRemoteHistory(editorProject.path);
+      setRemoteHistory(result);
+      if (!result.ok) {
+        setStatus(`Remote history failed: ${result.message}`);
+      } else {
+        setStatus(
+          result.isUpToDate
+            ? `Remote is up to date (${editorProject.name})`
+            : `Remote has different head (${editorProject.name})`
+        );
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown remote history error";
+      setRemoteHistory({ ok: false, message });
+      setStatus(`Remote history failed: ${message}`);
+    } finally {
+      setRemoteHistoryLoading(false);
+    }
+  }, [editorProject]);
 
   const submitEditor = useCallback(async () => {
     if (!editorMode || !editorProject) {
@@ -210,6 +265,10 @@ const App = (): JSX.Element => {
           setStatus("Commit message is required.");
           return;
         }
+        if (remoteHistory?.ok && remoteHistory.isUpToDate && !remoteHistory.hasLocalChanges) {
+          setStatus("Already up to date and no local changes. Commit+Push is disabled.");
+          return;
+        }
         const result = await electronApi.commitAndPush({
           projectPath: editorProject.path,
           message
@@ -232,7 +291,7 @@ const App = (): JSX.Element => {
       const message = error instanceof Error ? error.message : "Unknown action error";
       setStatus(`Action failed: ${message}`);
     }
-  }, [closeEditor, editorMode, editorProject, editorValue, patchProjectMetaInList]);
+  }, [closeEditor, editorMode, editorProject, editorValue, patchProjectMetaInList, remoteHistory]);
 
   const openConversation = useCallback(async (project: ProjectItem) => {
     try {
@@ -268,6 +327,12 @@ const App = (): JSX.Element => {
     ),
     []
   );
+
+  const commitBlocked =
+    editorMode === "commit" &&
+    remoteHistory?.ok &&
+    remoteHistory.isUpToDate &&
+    !remoteHistory.hasLocalChanges;
 
   return (
     <main className={`layout ${isSidebarCollapsed ? "sidebar-collapsed" : ""}`}>
@@ -397,10 +462,23 @@ const App = (): JSX.Element => {
                 <p className="hint">{editorProject.name}</p>
               </div>
               <div className="header-actions">
+                {editorMode === "commit" ? (
+                  <button
+                    className="btn secondary"
+                    onClick={() => void loadRemoteHistory()}
+                    disabled={remoteHistoryLoading}
+                  >
+                    {remoteHistoryLoading ? "Loading..." : "View Remote History"}
+                  </button>
+                ) : null}
                 <button className="btn secondary" onClick={closeEditor}>
                   Cancel
                 </button>
-                <button className="btn primary" onClick={() => void submitEditor()}>
+                <button
+                  className="btn primary"
+                  onClick={() => void submitEditor()}
+                  disabled={remoteHistoryLoading || !!commitBlocked}
+                >
                   Save
                 </button>
               </div>
@@ -425,6 +503,47 @@ const App = (): JSX.Element => {
                   }
                 />
               )}
+
+              {editorMode === "commit" && remoteHistory ? (
+                <section className="remote-history">
+                  <div className="remote-history-head">
+                    {remoteHistory.ok ? (
+                      <>
+                        <span className={`pill ${remoteHistory.isUpToDate ? "ok" : "warn"}`}>
+                          {remoteHistory.isUpToDate ? "Up to date" : "Not synced"}
+                        </span>
+                        <span className="hint">{remoteHistory.upstreamRef}</span>
+                      </>
+                    ) : (
+                      <span className="pill err">Error</span>
+                    )}
+                  </div>
+
+                  {remoteHistory.ok ? (
+                    <div className="remote-history-list">
+                      {remoteHistory.commits.map((commit) => (
+                        <article className="remote-history-item" key={commit.hash}>
+                          <div className="remote-history-meta">
+                            <span>{commit.shortHash}</span>
+                            <span>{commit.author}</span>
+                            <span>{commit.date}</span>
+                          </div>
+                          <div>{commit.subject}</div>
+                        </article>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="error-box">Failed: {remoteHistory.message}</div>
+                  )}
+                </section>
+              ) : null}
+
+              {editorMode === "commit" && commitBlocked ? (
+                <div className="warn-box">
+                  Remote and local are already synced, and there are no local changes. Commit+Push is
+                  disabled to prevent duplicate push.
+                </div>
+              ) : null}
             </div>
           </div>
         </div>
