@@ -138,6 +138,9 @@ export type GitRemoteHistoryResult =
       remoteHead: string;
       isUpToDate: boolean;
       hasLocalChanges: boolean;
+      aheadCount: number;
+      behindCount: number;
+      canPush: boolean;
       commits: RemoteCommitEntry[];
     }
   | {

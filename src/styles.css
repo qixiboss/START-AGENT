@@ -1062,6 +1062,16 @@ a {
   font-size: 12px;
 }
 
+.hint-box {
+  margin-top: 10px;
+  border-radius: 10px;
+  border: 1px solid #cfd9eb;
+  background: #f4f8ff;
+  color: #2f486a;
+  padding: 9px 10px;
+  font-size: 12px;
+}
+
 .pill {
   display: inline-flex;
   align-items: center;
