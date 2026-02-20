@@ -5,13 +5,32 @@ import {
   TerminalApprovalSubmitResult,
   GitAddRequest,
   GitAddResult,
+  GitGraphResult,
+  GitPolicyLoadResult,
+  GitPublishPrecheckRequest,
+  GitPublishPrecheckResult,
   GitCommitRequest,
   GitCommitResult,
   GitPullRequest,
   GitPullResult,
+  GitStashListResult,
+  GitStashPopRequest,
+  GitStashPopResult,
+  GitStashPushRequest,
+  GitStashPushResult,
+  GitSyncRequest,
+  GitSyncResult,
   GitUntrackedFilesResult,
   GitBranchesResult,
   GitRemoteHistoryResult,
+  QuotaAuthAuthorizeInAppRequest,
+  QuotaAuthAuthorizeInAppResult,
+  QuotaAuthImportRequest,
+  QuotaAuthImportResult,
+  QuotaAuthListResult,
+  QuotaAuthSaveRequest,
+  QuotaAuthSaveResult,
+  type QuotaListResult,
   IpcChannels,
   ListProjectsResult,
   PickDirectoryResult,
@@ -38,6 +57,20 @@ const api = {
   listProjects: (): Promise<ListProjectsResult> => ipcRenderer.invoke(IpcChannels.ListProjects),
   setProjectMeta: (request: ProjectMetaSetRequest): Promise<ProjectMetaSetResult> =>
     ipcRenderer.invoke(IpcChannels.ProjectMetaSet, request),
+  getGitPolicy: (projectPath: string): Promise<GitPolicyLoadResult> =>
+    ipcRenderer.invoke(IpcChannels.GitPolicyGet, { projectPath }),
+  precheckGitPublish: (request: GitPublishPrecheckRequest): Promise<GitPublishPrecheckResult> =>
+    ipcRenderer.invoke(IpcChannels.GitPublishPrecheck, request),
+  gitSync: (request: GitSyncRequest): Promise<GitSyncResult> =>
+    ipcRenderer.invoke(IpcChannels.GitSync, request),
+  listGitStash: (projectPath: string): Promise<GitStashListResult> =>
+    ipcRenderer.invoke(IpcChannels.GitStashList, { projectPath }),
+  pushGitStash: (request: GitStashPushRequest): Promise<GitStashPushResult> =>
+    ipcRenderer.invoke(IpcChannels.GitStashPush, request),
+  popGitStash: (request: GitStashPopRequest): Promise<GitStashPopResult> =>
+    ipcRenderer.invoke(IpcChannels.GitStashPop, request),
+  getGitGraph: (projectPath: string, limit?: number): Promise<GitGraphResult> =>
+    ipcRenderer.invoke(IpcChannels.GitGraph, { projectPath, limit }),
   commitAndPush: (request: GitCommitRequest): Promise<GitCommitResult> =>
     ipcRenderer.invoke(IpcChannels.GitCommitAndPush, request),
   getRemoteHistory: (projectPath: string): Promise<GitRemoteHistoryResult> =>
@@ -110,6 +143,16 @@ const api = {
     ipcRenderer.on(IpcChannels.TerminalApprovalRequiredEvent, listener);
     return () => ipcRenderer.off(IpcChannels.TerminalApprovalRequiredEvent, listener);
   },
+  listQuotas: (): Promise<QuotaListResult> => ipcRenderer.invoke(IpcChannels.QuotaList),
+  getQuotaAuthConfigs: (): Promise<QuotaAuthListResult> => ipcRenderer.invoke(IpcChannels.QuotaAuthGet),
+  saveQuotaAuthConfig: (request: QuotaAuthSaveRequest): Promise<QuotaAuthSaveResult> =>
+    ipcRenderer.invoke(IpcChannels.QuotaAuthSave, request),
+  importQuotaAuthFromBrowser: (request: QuotaAuthImportRequest): Promise<QuotaAuthImportResult> =>
+    ipcRenderer.invoke(IpcChannels.QuotaAuthImportBrowser, request),
+  authorizeQuotaInApp: (request: QuotaAuthAuthorizeInAppRequest): Promise<QuotaAuthAuthorizeInAppResult> =>
+    ipcRenderer.invoke(IpcChannels.QuotaAuthAuthorizeInApp, request),
+  openExternal: (url: string): Promise<{ ok: true } | { ok: false; message: string }> =>
+    ipcRenderer.invoke(IpcChannels.SystemOpenExternal, { url }),
   minimizeWindow: (): Promise<{ ok: true }> => ipcRenderer.invoke(IpcChannels.WindowMinimize),
   maximizeWindow: (): Promise<{ ok: true }> => ipcRenderer.invoke(IpcChannels.WindowMaximize),
   closeWindow: (): Promise<{ ok: true }> => ipcRenderer.invoke(IpcChannels.WindowClose),

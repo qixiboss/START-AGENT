@@ -5,6 +5,7 @@ import { IPty, spawn as spawnPty } from "node-pty";
 import {
   IpcChannels,
   SessionToolType,
+  ToolType,
   TerminalApprovalDecision,
   TerminalApprovalRequest,
   TerminalLaunchListResult,
@@ -44,6 +45,7 @@ type RuntimeSession = {
 const TERMINAL_LAUNCH_MAX = 300;
 const SESSION_SNAPSHOT_MAX = 20;
 const SESSION_OUTPUT_LINE_MAX = 5000;
+const SESSION_SNAPSHOT_FLUSH_MS = 500;
 const DANGEROUS_COMMAND_PATTERNS = [
   /\brm\b(?=[^\n\r]*\s-(?:[^\n\r]*r[^\n\r]*f|[^\n\r]*f[^\n\r]*r))(?=[^\n\r]*\s\S+)/i,
   /\bdel\b.+\s\/f\b/i,
@@ -61,7 +63,7 @@ type TerminalServiceContext = {
   getMainWindow: () => BrowserWindow | null;
 };
 
-const buildToolBootstrapCommand = (tool: "codex" | "claude"): string => {
+const buildToolBootstrapCommand = (tool: ToolType): string => {
   return `if (Get-Command ${tool} -ErrorAction SilentlyContinue) { ${tool} } else { Write-Host "[ERROR] Command '${tool}' not found in PATH." }`;
 };
 
@@ -86,6 +88,7 @@ const looksDangerousCommand = (data: string): boolean => {
 
 export const createTerminalService = (context: TerminalServiceContext) => {
   const runtimeSessions = new Map<string, RuntimeSession>();
+  const snapshotFlushTimers = new Map<string, NodeJS.Timeout>();
 
   const sendIpcEvent = <T,>(channel: string, payload: T): void => {
     const mainWindow = context.getMainWindow();
@@ -188,6 +191,34 @@ export const createTerminalService = (context: TerminalServiceContext) => {
     ].slice(0, SESSION_SNAPSHOT_MAX);
     settingsState.terminalSessionSnapshots = next;
     context.schedulePersistSettings();
+  };
+
+  const clearScheduledSnapshotFlush = (sessionId: string): void => {
+    const timer = snapshotFlushTimers.get(sessionId);
+    if (timer) {
+      clearTimeout(timer);
+      snapshotFlushTimers.delete(sessionId);
+    }
+  };
+
+  const scheduleSessionSnapshotFlush = (
+    info: TerminalSessionInfo,
+    outputBuffer: string[],
+    immediate = false
+  ): void => {
+    if (immediate) {
+      clearScheduledSnapshotFlush(info.id);
+      upsertSessionSnapshot(info, outputBuffer);
+      return;
+    }
+    if (snapshotFlushTimers.has(info.id)) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      snapshotFlushTimers.delete(info.id);
+      upsertSessionSnapshot(info, outputBuffer);
+    }, SESSION_SNAPSHOT_FLUSH_MS);
+    snapshotFlushTimers.set(info.id, timer);
   };
 
   const applyForwardedInputToBuffer = (runtime: RuntimeSession, data: string): void => {
@@ -439,13 +470,13 @@ export const createTerminalService = (context: TerminalServiceContext) => {
         isFlushingInput: false
       };
       runtimeSessions.set(session.id, runtime);
-      upsertSessionSnapshot(session, runtime.outputBuffer);
+      scheduleSessionSnapshotFlush(session, runtime.outputBuffer, true);
 
       emitSessionStatus(session.id, "running");
       emitInputState(session.id, "idle", 0);
       ptyProcess.onData((chunk: string) => {
         pushSessionOutput(session.id, "stdout", chunk);
-        upsertSessionSnapshot(runtime.info, runtime.outputBuffer);
+        scheduleSessionSnapshotFlush(runtime.info, runtime.outputBuffer);
       });
       ptyProcess.onExit((event) => {
         const runtimeEntry = runtimeSessions.get(session.id);
@@ -462,8 +493,9 @@ export const createTerminalService = (context: TerminalServiceContext) => {
             runtimeEntry.info.status === "error" ? "error" : "idle",
             runtimeEntry.pendingInputChunks.length
           );
-          upsertSessionSnapshot(runtimeEntry.info, runtimeEntry.outputBuffer);
+          scheduleSessionSnapshotFlush(runtimeEntry.info, runtimeEntry.outputBuffer, true);
         }
+        clearScheduledSnapshotFlush(session.id);
         runtimeSessions.delete(session.id);
       });
 
@@ -588,7 +620,7 @@ export const createTerminalService = (context: TerminalServiceContext) => {
     }
 
     runtime.info.status = "exited";
-    upsertSessionSnapshot(runtime.info, runtime.outputBuffer);
+    scheduleSessionSnapshotFlush(runtime.info, runtime.outputBuffer, true);
     runtimeSessions.delete(sessionId);
     emitSessionStatus(sessionId, "exited");
     emitInputState(sessionId, "idle", 0);
@@ -632,7 +664,7 @@ export const createTerminalService = (context: TerminalServiceContext) => {
         runtime.ptyProcess.kill();
       }
       runtime.info.status = "exited";
-      upsertSessionSnapshot(runtime.info, runtime.outputBuffer);
+      scheduleSessionSnapshotFlush(runtime.info, runtime.outputBuffer, true);
       emitInputState(sessionId, "idle", 0);
       runtimeSessions.delete(sessionId);
     }

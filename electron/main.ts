@@ -11,30 +11,56 @@ import {
 } from "./services/projects.js";
 import {
   commitAndPush as commitAndPushService,
+  getGitGraph as getGitGraphService,
+  getGitPolicy as getGitPolicyService,
   getRemoteHistory as getRemoteHistoryService,
   gitAdd as gitAddService,
   gitPull as gitPullService,
+  gitSync as gitSyncService,
   listGitBranches as listGitBranchesService,
-  listGitUntrackedFiles as listGitUntrackedFilesService
+  listGitStash as listGitStashService,
+  listGitUntrackedFiles as listGitUntrackedFilesService,
+  popGitStash as popGitStashService,
+  precheckGitPublish as precheckGitPublishService,
+  pushGitStash as pushGitStashService
 } from "./services/git.js";
 import { ensureOriginConfigured } from "./utils/git.js";
 import { createTerminalService } from "./services/terminal.js";
 import { PersistManager, persistSettingsSync as persistSettingsSyncFile } from "./services/storage.js";
+import { listQuotas as listQuotasService } from "./services/quota.js";
+import { QuotaAuthManager } from "./services/quotaAuth.js";
 import type { Settings } from "./services/types.js";
 import {
   GitAddRequest,
   GitAddResult,
   GitCommitRequest,
   GitCommitResult,
+  GitGraphResult,
+  GitPolicyLoadResult,
+  GitPublishPrecheckRequest,
+  GitPublishPrecheckResult,
   GitPullRequest,
   GitPullResult,
+  GitStashListResult,
+  GitStashPopRequest,
+  GitStashPopResult,
+  GitStashPushRequest,
+  GitStashPushResult,
+  GitSyncRequest,
+  GitSyncResult,
   GitUntrackedFilesResult,
   GitBranchesResult,
   GitRemoteHistoryResult,
   ListProjectsResult,
   ProjectMeta,
   ProjectMetaSetRequest,
-  ProjectMetaSetResult
+  ProjectMetaSetResult,
+  QuotaAuthImportRequest,
+  QuotaAuthImportResult,
+  QuotaAuthListResult,
+  QuotaListResult,
+  QuotaAuthSaveRequest,
+  QuotaAuthSaveResult
 } from "../src/types/ipc.js";
 import type { ProjectsServiceContext } from "./services/projects.js";
 
@@ -46,6 +72,7 @@ let settingsState: Settings = {
   terminalSessionSnapshots: []
 };
 const persistManager = new PersistManager(settingsState);
+const quotaAuthManager = new QuotaAuthManager();
 let launchPruneTimer: NodeJS.Timeout | null = null;
 let mainWindowRef: BrowserWindow | null = null;
 
@@ -167,6 +194,34 @@ const setProjectMeta = async (request: ProjectMetaSetRequest): Promise<ProjectMe
   return setProjectMetaService(projectsContext, request, ensureOriginConfigured);
 };
 
+const getGitPolicy = async (projectPath: string): Promise<GitPolicyLoadResult> => {
+  return getGitPolicyService(projectPath);
+};
+
+const precheckGitPublish = async (request: GitPublishPrecheckRequest): Promise<GitPublishPrecheckResult> => {
+  return precheckGitPublishService(request, getProjectMeta);
+};
+
+const gitSync = async (request: GitSyncRequest): Promise<GitSyncResult> => {
+  return gitSyncService(request, getProjectMeta);
+};
+
+const listGitStash = async (projectPath: string): Promise<GitStashListResult> => {
+  return listGitStashService(projectPath);
+};
+
+const pushGitStash = async (request: GitStashPushRequest): Promise<GitStashPushResult> => {
+  return pushGitStashService(request);
+};
+
+const popGitStash = async (request: GitStashPopRequest): Promise<GitStashPopResult> => {
+  return popGitStashService(request);
+};
+
+const getGitGraph = async (projectPath: string, limit?: number): Promise<GitGraphResult> => {
+  return getGitGraphService(projectPath, limit);
+};
+
 const commitAndPush = async (request: GitCommitRequest): Promise<GitCommitResult> => {
   return commitAndPushService(request, getProjectMeta);
 };
@@ -189,6 +244,26 @@ const listGitBranches = async (projectPath: string): Promise<GitBranchesResult> 
 
 const getRemoteHistory = async (projectPath: string): Promise<GitRemoteHistoryResult> => {
   return getRemoteHistoryService(projectPath, getProjectMeta);
+};
+
+const listQuotas = (): Promise<QuotaListResult> => {
+  return listQuotasService({
+    getRuntimeConfig: (provider) => quotaAuthManager.getRuntimeConfig(provider)
+  });
+};
+
+const getQuotaAuthConfigs = (): Promise<QuotaAuthListResult> => {
+  return quotaAuthManager.getAuthConfigs();
+};
+
+const saveQuotaAuthConfig = (request: QuotaAuthSaveRequest): Promise<QuotaAuthSaveResult> => {
+  return quotaAuthManager.saveAuthConfig(request);
+};
+
+const importQuotaAuthFromBrowser = (
+  request: QuotaAuthImportRequest
+): Promise<QuotaAuthImportResult> => {
+  return quotaAuthManager.importAuthFromBrowser(request);
 };
 
 const terminalService = createTerminalService({
@@ -226,6 +301,13 @@ const registerIpc = (mainWindow: BrowserWindow): void => {
       setProjectMeta
     },
     git: {
+      getGitPolicy,
+      precheckGitPublish,
+      gitSync,
+      listGitStash,
+      pushGitStash,
+      popGitStash,
+      getGitGraph,
       commitAndPush,
       getRemoteHistory,
       listGitBranches,
@@ -247,12 +329,19 @@ const registerIpc = (mainWindow: BrowserWindow): void => {
       listTerminalSessions,
       listTerminalSessionSnapshots,
       submitTerminalApproval
+    },
+    quota: {
+      listQuotas,
+      getQuotaAuthConfigs,
+      saveQuotaAuthConfig,
+      importQuotaAuthFromBrowser
     }
   });
 };
 
 app.whenReady().then(async () => {
   await initRootPath();
+  await quotaAuthManager.init();
   const mainWindow = createMainWindow();
   registerIpc(mainWindow);
   launchPruneTimer = setInterval(pruneClosedLaunches, 3000);

@@ -4,13 +4,15 @@ import TitleBar from "./components/TitleBar";
 import { type EmbeddedTerminalHandle } from "./components/EmbeddedTerminal";
 import { TerminalStage } from "./components/App/TerminalStage";
 import { GitCommitModal } from "./components/App/GitCommitModal";
-import { electronApi } from "./services/electronApi";
+import { QuotaCenterPanel, QuotaMetricCard } from "./components/App/QuotaCenter";
+import { desktopApiAvailable, electronApi } from "./services/electronApi";
 import { useLocalStorage } from "./hooks/useLocalStorage";
 import { useProjects } from "./hooks/useProjects";
 import { useTerminalSessions } from "./hooks/useTerminalSessions";
 import { useTerminalLaunches } from "./hooks/useTerminalLaunches";
 import { useGitOperations } from "./hooks/useGitOperations";
 import { useEmbeddedSessionActions } from "./hooks/useEmbeddedSessionActions";
+import { useQuotaStatus } from "./hooks/useQuotaStatus";
 import type {
   TerminalApprovalRequest,
   TerminalSessionInfo,
@@ -78,7 +80,7 @@ const buildGitSyncHint = (
   if (history.canPush && history.behindCount > 0) {
     return {
       level: "warn",
-      text: `Local branch has ${history.aheadCount} commit(s) to push and is behind ${history.behindCount} commit(s). Pull/rebase before push.`
+      text: `Local branch has ${history.aheadCount} commit(s) to push and is behind ${history.behindCount} commit(s). Sync before push.`
     };
   }
   if (history.canPush) {
@@ -96,7 +98,7 @@ const buildGitSyncHint = (
   if (history.behindCount > 0) {
     return {
       level: "warn",
-      text: `Remote has ${history.behindCount} newer commit(s). Pull before pushing.`
+      text: `Remote has ${history.behindCount} newer commit(s). Sync before pushing.`
     };
   }
   return {
@@ -124,6 +126,21 @@ const App = (): JSX.Element => {
     remoteHistory,
     gitBranches,
     gitUntrackedFiles,
+    gitPolicy,
+    publishPrecheck,
+    lastSyncResult,
+    gitGraph,
+    stashEntries,
+    stashMessage,
+    setStashMessage,
+    stashIncludeUntracked,
+    setStashIncludeUntracked,
+    allowProtectedPush,
+    setAllowProtectedPush,
+    allowBehindPush,
+    setAllowBehindPush,
+    gitSyncStrategy,
+    setGitSyncStrategy,
     gitAddMode,
     setGitAddMode,
     selectedNewFiles,
@@ -136,11 +153,16 @@ const App = (): JSX.Element => {
     isPulling,
     isRefreshingGit,
     isPublishing,
+    isRunningPrecheck,
+    isStashing,
     openEditor,
     closeEditor,
     loadRemoteHistory,
+    runPublishPrecheck,
     runGitAdd,
     runGitPull,
+    runGitStashPush,
+    runGitStashPop,
     submitEditor
   } = useGitOperations({ setStatus, patchProjectMetaInList });
   const {
@@ -194,7 +216,9 @@ const App = (): JSX.Element => {
     loadTerminalSessions,
     loadTerminalSnapshots
   });
-  const terminalHandleRef = useRef<EmbeddedTerminalHandle | null>(null);
+  const terminalHandleRef = useRef<EmbeddedTerminalHandle>(null);
+  const pendingOutputBySessionRef = useRef<Record<string, string[]>>({});
+  const outputFlushRafRef = useRef<number | null>(null);
   const [useExternalTerminal, setUseExternalTerminal] = useLocalStorage<boolean>(
     EXTERNAL_TERMINAL_KEY,
     false,
@@ -207,15 +231,83 @@ const App = (): JSX.Element => {
     (raw) => raw === "1",
     (value) => (value ? "1" : "0")
   );
+  const {
+    quotaItems,
+    quotaLoading,
+    quotaError,
+    showQuotaPanel,
+    setShowQuotaPanel,
+    quotaCheckedAt,
+    quotaSummary,
+    quotaStatusCounts,
+    refreshQuotas,
+    openQuotaConsole,
+    quotaAuthConfigs,
+    quotaAuthLoading,
+    quotaAuthError,
+    quotaSecretStorageMode,
+    refreshQuotaAuthConfigs,
+    saveQuotaAuthConfig,
+    importQuotaAuthFromBrowser,
+    authorizeQuotaInApp
+  } = useQuotaStatus({ withTimeout, setStatus });
+
+  const flushPendingTerminalOutput = useCallback(() => {
+    outputFlushRafRef.current = null;
+    const pending = pendingOutputBySessionRef.current;
+    const entries = Object.entries(pending);
+    if (entries.length === 0) {
+      return;
+    }
+    pendingOutputBySessionRef.current = {};
+    setTerminalOutputBySession((prev) => {
+      let changed = false;
+      const next: Record<string, string> = { ...prev };
+      for (const [sessionId, chunks] of entries) {
+        const mergedChunk = chunks.join("");
+        if (!mergedChunk) {
+          continue;
+        }
+        const previousOutput = next[sessionId] ?? "";
+        const mergedOutput = appendTerminalOutput(previousOutput, mergedChunk);
+        if (mergedOutput !== previousOutput) {
+          next[sessionId] = mergedOutput;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [setTerminalOutputBySession]);
+
+  const enqueueTerminalOutput = useCallback((sessionId: string, data: string) => {
+    if (!data) {
+      return;
+    }
+    const bucket = pendingOutputBySessionRef.current[sessionId];
+    if (bucket) {
+      bucket.push(data);
+    } else {
+      pendingOutputBySessionRef.current[sessionId] = [data];
+    }
+    if (outputFlushRafRef.current === null) {
+      outputFlushRafRef.current = window.requestAnimationFrame(flushPendingTerminalOutput);
+    }
+  }, [flushPendingTerminalOutput]);
 
   useEffect(() => {
     void scanProjects();
+    if (!desktopApiAvailable) {
+      return;
+    }
     void loadTerminalLaunches();
     void loadTerminalSessions();
     void loadTerminalSnapshots();
-  }, [loadTerminalLaunches, loadTerminalSessions, loadTerminalSnapshots, scanProjects]);
+  }, [desktopApiAvailable, loadTerminalLaunches, loadTerminalSessions, loadTerminalSnapshots, scanProjects]);
 
   useEffect(() => {
+    if (!desktopApiAvailable) {
+      return;
+    }
     const timer = window.setInterval(() => {
       if (useExternalTerminal) {
         void loadTerminalLaunches();
@@ -224,18 +316,18 @@ const App = (): JSX.Element => {
       }
     }, 5000);
     return () => window.clearInterval(timer);
-  }, [loadTerminalLaunches, loadTerminalSnapshots, useExternalTerminal]);
+  }, [desktopApiAvailable, loadTerminalLaunches, loadTerminalSnapshots, useExternalTerminal]);
 
   useEffect(() => {
+    if (!desktopApiAvailable) {
+      return;
+    }
     const offOutput = electronApi.onTerminalSessionOutput((chunk) => {
       const normalized = sanitizeTerminalChunk(chunk.data);
       if (!normalized) {
         return;
       }
-      setTerminalOutputBySession((prev) => ({
-        ...prev,
-        [chunk.sessionId]: appendTerminalOutput(prev[chunk.sessionId] ?? "", normalized)
-      }));
+      enqueueTerminalOutput(chunk.sessionId, normalized);
     });
     const offStatus = electronApi.onTerminalSessionStatus((event) => {
       setTerminalSessions((prev) =>
@@ -263,8 +355,13 @@ const App = (): JSX.Element => {
       offStatus();
       offApproval();
       offInputState();
+      pendingOutputBySessionRef.current = {};
+      if (outputFlushRafRef.current !== null) {
+        window.cancelAnimationFrame(outputFlushRafRef.current);
+        outputFlushRafRef.current = null;
+      }
     };
-  }, [loadTerminalSessions, loadTerminalSnapshots]);
+  }, [desktopApiAvailable, enqueueTerminalOutput, loadTerminalSessions, loadTerminalSnapshots]);
 
   useEffect(() => {
     if (terminalSessions.length === 0) {
@@ -423,14 +520,19 @@ const App = (): JSX.Element => {
           <p className="eyebrow">START-AGENT</p>
           <h1>Workspace Command Center</h1>
           <p className="hint">
-            {useExternalTerminal
+            {!desktopApiAvailable
+              ? "Browser preview mode. Launch the Electron app to enable terminal, Git, and filesystem actions."
+              : useExternalTerminal
               ? launchRecords.length === 0
-                ? "Open Codex or Claude to launch Windows PowerShell sessions."
+                ? "Open Codex, Claude, or OpenCode to launch Windows PowerShell sessions."
                 : `Recent external launches: ${launchRecords.length}`
               : terminalSessions.length === 0
-                ? "Open Codex / Claude / Shell to start embedded sessions."
+                ? "Open Codex / Claude / OpenCode / Shell to start embedded sessions."
                 : `Active embedded sessions: ${terminalSessions.length}`}
           </p>
+          {!desktopApiAvailable ? (
+            <p className="preview-pill">Preview Mode: desktop actions are disabled in browser.</p>
+          ) : null}
         </div>
         <div className="hero-metrics">
           <div className="metric-card">
@@ -445,11 +547,39 @@ const App = (): JSX.Element => {
             <span>Status</span>
             <strong title={status}>{status}</strong>
           </div>
+          <QuotaMetricCard
+            quotaLoading={quotaLoading}
+            quotaSummary={quotaSummary}
+            quotaCheckedAt={quotaCheckedAt}
+            quotaStatusCounts={quotaStatusCounts}
+            showQuotaPanel={showQuotaPanel}
+            onRefresh={() => void refreshQuotas()}
+            onTogglePanel={() => setShowQuotaPanel((prev) => !prev)}
+          />
         </div>
       </header>
+      <QuotaCenterPanel
+        show={showQuotaPanel}
+        quotaItems={quotaItems}
+        quotaLoading={quotaLoading}
+        quotaError={quotaError}
+        quotaCheckedAt={quotaCheckedAt}
+        quotaAuthConfigs={quotaAuthConfigs}
+        quotaAuthLoading={quotaAuthLoading}
+        quotaAuthError={quotaAuthError}
+        quotaSecretStorageMode={quotaSecretStorageMode}
+        onRefresh={() => void refreshQuotas()}
+        onRefreshAuth={() => void refreshQuotaAuthConfigs()}
+        onSaveAuth={(request) => saveQuotaAuthConfig(request)}
+        onImportAuthFromBrowser={(provider, browser) => importQuotaAuthFromBrowser(provider, browser)}
+        onAuthorizeInApp={(provider) => authorizeQuotaInApp(provider)}
+        onClose={() => setShowQuotaPanel(false)}
+        onOpenConsole={(url) => void openQuotaConsole(url)}
+      />
 
       <section className={`workspace-shell ${isSidebarCollapsed ? "sidebar-collapsed" : ""}`}>
         <TerminalStage
+          desktopApiAvailable={desktopApiAvailable}
           useExternalTerminal={useExternalTerminal}
           setUseExternalTerminal={setUseExternalTerminal}
           loadTerminalLaunches={loadTerminalLaunches}
@@ -487,6 +617,7 @@ const App = (): JSX.Element => {
         <section className={`context-rail ${isSidebarCollapsed ? "collapsed" : ""}`}>
           <ProjectList
             collapsed={isSidebarCollapsed}
+            desktopApiAvailable={desktopApiAvailable}
             rootPath={rootPath}
             projects={filteredProjects}
             loading={loading}
@@ -518,11 +649,17 @@ const App = (): JSX.Element => {
           isRefreshingGit={isRefreshingGit}
           isPublishing={isPublishing}
           isAdding={isAdding}
+          isRunningPrecheck={isRunningPrecheck}
+          isStashing={isStashing}
           remoteHistoryLoading={remoteHistoryLoading}
           gitWorkflowBusy={gitWorkflowBusy}
           runGitPull={runGitPull}
+          runPublishPrecheck={runPublishPrecheck}
+          runGitStashPush={runGitStashPush}
+          runGitStashPop={runGitStashPop}
           loadRemoteHistory={loadRemoteHistory}
           submitEditor={submitEditor}
+          sendTerminalData={sendTerminalData}
           editorValue={editorValue}
           setEditorValue={setEditorValue}
           gitAddMode={gitAddMode}
@@ -535,6 +672,21 @@ const App = (): JSX.Element => {
           setSelectedRemoteBranch={setSelectedRemoteBranch}
           gitBranches={gitBranches}
           remoteHistory={remoteHistory}
+          gitPolicy={gitPolicy}
+          publishPrecheck={publishPrecheck}
+          lastSyncResult={lastSyncResult}
+          gitGraph={gitGraph}
+          stashEntries={stashEntries}
+          stashMessage={stashMessage}
+          setStashMessage={setStashMessage}
+          stashIncludeUntracked={stashIncludeUntracked}
+          setStashIncludeUntracked={setStashIncludeUntracked}
+          allowProtectedPush={allowProtectedPush}
+          setAllowProtectedPush={setAllowProtectedPush}
+          allowBehindPush={allowBehindPush}
+          setAllowBehindPush={setAllowBehindPush}
+          gitSyncStrategy={gitSyncStrategy}
+          setGitSyncStrategy={setGitSyncStrategy}
           buildGitSyncHint={buildGitSyncHint}
         />
       ) : null}

@@ -1,0 +1,35 @@
+{
+  "workflow": "trunk_short_branch",
+  "pullStrategy": "rebase",
+  "protectedBranches": [
+    "main",
+    "master",
+    "release"
+  ],
+  "commitConvention": {
+    "type": "conventional_commits",
+    "allowedTypes": [
+      "feat",
+      "fix",
+      "chore",
+      "docs",
+      "refactor",
+      "test",
+      "build",
+      "ci",
+      "perf",
+      "revert",
+      "style"
+    ],
+    "maxHeaderLength": 72
+  },
+  "pushPolicy": {
+    "requireUpToDateBeforePush": true,
+    "warnWhenBehind": true,
+    "confirmPushToProtected": true
+  },
+  "branchPolicy": {
+    "suggestPattern": "^(feat|fix|chore|hotfix|docs)/[a-z0-9._-]+$",
+    "warnIfNotMatch": true
+  }
+}

@@ -5,6 +5,7 @@ export type ProjectFilter = "all" | "recent";
 
 type ProjectListProps = {
   collapsed: boolean;
+  desktopApiAvailable: boolean;
   rootPath: string;
   projects: ProjectItem[];
   loading: boolean;
@@ -44,6 +45,7 @@ const formatLaunchTime = (timestamp: number): string => {
 
 export const ProjectList = memo(({
   collapsed,
+  desktopApiAvailable,
   rootPath,
   projects,
   loading,
@@ -101,6 +103,9 @@ export const ProjectList = memo(({
         <div>
           <h2>Command Deck</h2>
           <p className="hint">{rootPath}</p>
+          {!desktopApiAvailable ? (
+            <p className="hint">Browser preview mode. Launch the Electron app to enable project discovery and tool launches.</p>
+          ) : null}
         </div>
         <div className="header-actions">
           <button
@@ -111,10 +116,10 @@ export const ProjectList = memo(({
           >
             Collapse
           </button>
-          <button className="btn secondary" onClick={onChooseFolder} disabled={loading}>
+          <button className="btn secondary" onClick={onChooseFolder} disabled={loading || !desktopApiAvailable}>
             Choose Folder
           </button>
-          <button className="btn secondary" onClick={onRefresh} disabled={loading}>
+          <button className="btn secondary" onClick={onRefresh} disabled={loading || !desktopApiAvailable}>
             {loading ? "Scanning..." : "Refresh"}
           </button>
         </div>
@@ -159,7 +164,11 @@ export const ProjectList = memo(({
           {error ? <div className="error-box">{error}</div> : null}
 
           {!error && projects.length === 0 && !loading ? (
-            <div className="empty">No project directories found in root.</div>
+            <div className={`empty ${desktopApiAvailable ? "" : "preview-empty"}`}>
+              {desktopApiAvailable
+                ? "No project directories found in root."
+                : "Browser preview mode is active. Open this project in Electron to scan and manage real workspaces."}
+            </div>
           ) : null}
 
           {projects.map((project) => {
@@ -196,11 +205,26 @@ export const ProjectList = memo(({
                   </div>
                 </button>
                 <div className="project-row-actions">
-                  <button className="btn tiny primary" onClick={() => onLaunch(project, "codex")}>
+                  <button
+                    className="btn tiny primary"
+                    onClick={() => onLaunch(project, "codex")}
+                    disabled={!desktopApiAvailable}
+                  >
                     Codex
                   </button>
-                  <button className="btn tiny ghost-accent" onClick={() => onLaunch(project, "claude")}>
+                  <button
+                    className="btn tiny ghost-accent"
+                    onClick={() => onLaunch(project, "claude")}
+                    disabled={!desktopApiAvailable}
+                  >
                     Claude
+                  </button>
+                  <button
+                    className="btn tiny secondary"
+                    onClick={() => onLaunch(project, "opencode")}
+                    disabled={!desktopApiAvailable}
+                  >
+                    OpenCode
                   </button>
                 </div>
               </article>
@@ -217,21 +241,24 @@ export const ProjectList = memo(({
               <span className="hint">{selectedProject.path}</span>
             </div>
             <div className="actions primary-actions">
-              <button className="btn primary" onClick={() => onLaunch(selectedProject, "codex")}>
+              <button className="btn primary" onClick={() => onLaunch(selectedProject, "codex")} disabled={!desktopApiAvailable}>
                 Open Codex
               </button>
-              <button className="btn ghost-accent" onClick={() => onLaunch(selectedProject, "claude")}>
+              <button className="btn ghost-accent" onClick={() => onLaunch(selectedProject, "claude")} disabled={!desktopApiAvailable}>
                 Open Claude
+              </button>
+              <button className="btn secondary" onClick={() => onLaunch(selectedProject, "opencode")} disabled={!desktopApiAvailable}>
+                Open OpenCode
               </button>
             </div>
             <div className="actions secondary-actions">
-              <button className="btn secondary" onClick={() => onEditNote(selectedProject)}>
+              <button className="btn secondary" onClick={() => onEditNote(selectedProject)} disabled={!desktopApiAvailable}>
                 Note
               </button>
-              <button className="btn secondary" onClick={() => onEditGithub(selectedProject)}>
+              <button className="btn secondary" onClick={() => onEditGithub(selectedProject)} disabled={!desktopApiAvailable}>
                 GitHub
               </button>
-              <button className="btn secondary" onClick={() => onCommitPush(selectedProject)}>
+              <button className="btn secondary" onClick={() => onCommitPush(selectedProject)} disabled={!desktopApiAvailable}>
                 Git Flow
               </button>
             </div>

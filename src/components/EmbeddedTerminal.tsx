@@ -4,6 +4,8 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import type { TerminalSessionInputStateValue } from "../types/ipc";
 
+const RESIZE_NOTIFY_DEBOUNCE_MS = 100;
+
 export type EmbeddedTerminalHandle = {
   focus: () => void;
   scrollToBottom: () => void;
@@ -31,6 +33,8 @@ const EmbeddedTerminal = forwardRef<EmbeddedTerminalHandle, EmbeddedTerminalProp
   const onResizeRef = useRef(onResize);
   const onDataRef = useRef(onData);
   const imeAnchorRafRef = useRef<number | null>(null);
+  const resizeDebounceRef = useRef<number | null>(null);
+  const lastNotifiedSizeRef = useRef<{ cols: number; rows: number } | null>(null);
   const [isFocused, setIsFocused] = useState(false);
   const [isComposing, setIsComposing] = useState(false);
 
@@ -140,7 +144,22 @@ const EmbeddedTerminal = forwardRef<EmbeddedTerminalHandle, EmbeddedTerminalProp
       }
       fit.fit();
       anchorImeTextarea();
-      onResizeRef.current?.(term.cols, term.rows);
+      const nextSize = { cols: term.cols, rows: term.rows };
+      const lastSize = lastNotifiedSizeRef.current;
+      if (!lastSize || lastSize.cols !== nextSize.cols || lastSize.rows !== nextSize.rows) {
+        lastNotifiedSizeRef.current = nextSize;
+        onResizeRef.current?.(nextSize.cols, nextSize.rows);
+      }
+    };
+
+    const scheduleResize = () => {
+      if (resizeDebounceRef.current !== null) {
+        window.clearTimeout(resizeDebounceRef.current);
+      }
+      resizeDebounceRef.current = window.setTimeout(() => {
+        resizeDebounceRef.current = null;
+        notifySize();
+      }, RESIZE_NOTIFY_DEBOUNCE_MS);
     };
 
     const dataDisposable = terminal.onData((data) => {
@@ -197,9 +216,9 @@ const EmbeddedTerminal = forwardRef<EmbeddedTerminalHandle, EmbeddedTerminalProp
       return true;
     });
     notifySize();
-    const observer = new ResizeObserver(() => notifySize());
+    const observer = new ResizeObserver(() => scheduleResize());
     observer.observe(container);
-    const onWindowResize = () => notifySize();
+    const onWindowResize = () => scheduleResize();
     window.addEventListener("resize", onWindowResize);
 
     return () => {
@@ -219,6 +238,11 @@ const EmbeddedTerminal = forwardRef<EmbeddedTerminalHandle, EmbeddedTerminalProp
         window.cancelAnimationFrame(imeAnchorRafRef.current);
         imeAnchorRafRef.current = null;
       }
+      if (resizeDebounceRef.current !== null) {
+        window.clearTimeout(resizeDebounceRef.current);
+        resizeDebounceRef.current = null;
+      }
+      lastNotifiedSizeRef.current = null;
       setIsFocused(false);
       setIsComposing(false);
     };

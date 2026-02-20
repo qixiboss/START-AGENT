@@ -20,7 +20,7 @@ type EmbeddedSessionsPanelProps = {
   scrollActiveTerminalToBottom: () => void;
   approvalBySession: Record<string, TerminalApprovalRequest>;
   submitApproval: (sessionId: string, decision: "allow_once" | "allow_session" | "deny") => Promise<void>;
-  terminalHandleRef: RefObject<EmbeddedTerminalHandle | null>;
+  terminalHandleRef: RefObject<EmbeddedTerminalHandle>;
   terminalOutputBySession: Record<string, string>;
   sendTerminalData: (data: string) => void;
   resizeEmbeddedSession: (sessionId: string, cols: number, rows: number) => Promise<void>;
@@ -56,7 +56,8 @@ export const EmbeddedSessionsPanel = memo((props: EmbeddedSessionsPanelProps): J
           terminalSessions.map((session) => (
             <button
               key={session.id}
-              className={`session-tab ${activeSessionId === session.id ? "active" : ""}`}
+              className={`session-tab state-${session.status} ${activeSessionId === session.id ? "active" : ""}`}
+              title={`${session.projectName} (${session.tool})`}
               onClick={() => setActiveSessionId(session.id)}
             >
               <span>
@@ -78,7 +79,7 @@ export const EmbeddedSessionsPanel = memo((props: EmbeddedSessionsPanelProps): J
                   }
                 }}
               >
-                x
+                ×
               </span>
             </button>
           ))
@@ -87,17 +88,18 @@ export const EmbeddedSessionsPanel = memo((props: EmbeddedSessionsPanelProps): J
 
       {activeSession ? (
         <>
-          <div className="terminal-toolbar">
-            <div className="terminal-toolbar-left">
-              <strong>
-                {activeSession.projectName} - {activeSession.tool}
-              </strong>
-              <span className={`pill ${sessionStatusPillClass(activeSession.status)}`}>{activeSession.status}</span>
-              <span className={`terminal-input-state state-${activeInputState.state}`}>
-                {inputStateLabel(activeInputState.state)}
-                {activeInputState.queueLength > 0 ? ` (${activeInputState.queueLength})` : ""}
-              </span>
-            </div>
+            <div className="terminal-toolbar">
+              <div className="terminal-toolbar-left">
+                <strong>
+                  {activeSession.projectName} - {activeSession.tool}
+                </strong>
+                <span className="terminal-toolbar-meta">{activeSession.id.slice(0, 8)}</span>
+                <span className={`pill ${sessionStatusPillClass(activeSession.status)}`}>{activeSession.status}</span>
+                <span className={`terminal-input-state state-${activeInputState.state}`}>
+                  {inputStateLabel(activeInputState.state)}
+                  {activeInputState.queueLength > 0 ? ` (${activeInputState.queueLength})` : ""}
+                </span>
+              </div>
             <div className="terminal-toolbar-actions">
               <button className="btn secondary tiny" onClick={scrollActiveTerminalToBottom}>
                 Bottom
@@ -147,7 +149,7 @@ export const EmbeddedSessionsPanel = memo((props: EmbeddedSessionsPanelProps): J
       ) : (
         <div className="terminal-empty">
           <h3>No Active Session</h3>
-          <p>Open Codex / Claude from project actions, or open a Shell session.</p>
+          <p>Open Codex / Claude / OpenCode from project actions, or open a Shell session.</p>
           {terminalSnapshots.length > 0 ? (
             <div className="session-snapshot-list">
               {terminalSnapshots.slice(0, 5).map((snapshot) => (

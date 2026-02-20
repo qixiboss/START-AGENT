@@ -1,15 +1,29 @@
-﻿import { useCallback, useState } from "react";
+import { useCallback, useRef, useState, type SetStateAction } from "react";
 import { electronApi } from "../services/electronApi";
 import type {
   GitBranchesResult,
+  GitGraphResult,
+  GitPolicyLoadResult,
+  GitPublishPrecheckResult,
   GitRemoteHistoryResult,
+  GitStashEntry,
+  GitSyncResult,
+  GitSyncStrategy,
   GitUntrackedFilesResult,
   ProjectItem,
   ProjectMeta
 } from "../types/ipc";
 
 export type EditorMode = "note" | "github" | "commit";
-type GitWorkflowAction = "add" | "pull" | "refresh" | "publish" | null;
+type GitWorkflowAction =
+  | "add"
+  | "sync"
+  | "refresh"
+  | "publish"
+  | "precheck"
+  | "stash_push"
+  | "stash_pop"
+  | null;
 
 type UseGitOperationsArgs = {
   setStatus: (value: string) => void;
@@ -23,31 +37,70 @@ export const useGitOperations = ({ setStatus, patchProjectMetaInList }: UseGitOp
   const [remoteHistory, setRemoteHistory] = useState<GitRemoteHistoryResult | null>(null);
   const [gitBranches, setGitBranches] = useState<GitBranchesResult | null>(null);
   const [gitUntrackedFiles, setGitUntrackedFiles] = useState<GitUntrackedFilesResult | null>(null);
+  const [gitPolicy, setGitPolicy] = useState<GitPolicyLoadResult | null>(null);
+  const [publishPrecheck, setPublishPrecheck] = useState<GitPublishPrecheckResult | null>(null);
+  const [lastSyncResult, setLastSyncResult] = useState<GitSyncResult | null>(null);
+  const [gitGraph, setGitGraph] = useState<GitGraphResult | null>(null);
+  const [stashEntries, setStashEntries] = useState<GitStashEntry[]>([]);
+  const [stashMessage, setStashMessage] = useState<string>("");
+  const [stashIncludeUntracked, setStashIncludeUntracked] = useState<boolean>(true);
+  const [allowProtectedPush, setAllowProtectedPush] = useState<boolean>(false);
+  const [allowBehindPush, setAllowBehindPush] = useState<boolean>(false);
+  const [gitSyncStrategy, setGitSyncStrategyState] = useState<GitSyncStrategy>("rebase");
   const [gitAddMode, setGitAddMode] = useState<"all" | "selected_new">("all");
   const [selectedNewFiles, setSelectedNewFiles] = useState<string[]>([]);
   const [selectedRemoteBranch, setSelectedRemoteBranch] = useState<string>("");
   const [remoteHistoryLoading, setRemoteHistoryLoading] = useState<boolean>(false);
   const [gitWorkflowAction, setGitWorkflowAction] = useState<GitWorkflowAction>(null);
+  const gitSyncStrategyUserSelectedRef = useRef<boolean>(false);
+
+  const setGitSyncStrategy = useCallback((strategy: SetStateAction<GitSyncStrategy>) => {
+    gitSyncStrategyUserSelectedRef.current = true;
+    setGitSyncStrategyState(strategy);
+  }, []);
 
   const loadCommitContext = useCallback(
     async (project: ProjectItem, showSuccessStatus: boolean) => {
       setRemoteHistoryLoading(true);
       try {
-        const [historyResult, branchesResult, untrackedResult] = await Promise.all([
+        const [historyResult, branchesResult, untrackedResult, policyResult, stashResult, graphResult] = await Promise.all([
           electronApi.getRemoteHistory(project.path),
           electronApi.listGitBranches(project.path),
-          electronApi.listGitUntrackedFiles(project.path)
+          electronApi.listGitUntrackedFiles(project.path),
+          electronApi.getGitPolicy(project.path),
+          electronApi.listGitStash(project.path),
+          electronApi.getGitGraph(project.path, 30)
         ]);
+
         setRemoteHistory(historyResult);
         setGitBranches(branchesResult);
         setGitUntrackedFiles(untrackedResult);
+        setGitPolicy(policyResult);
+        setGitGraph(graphResult);
+        setPublishPrecheck(null);
+        setLastSyncResult(null);
+
+        if (!gitSyncStrategyUserSelectedRef.current) {
+          setGitSyncStrategyState(policyResult.policy.pullStrategy);
+        }
+
         if (branchesResult.ok) {
-          setSelectedRemoteBranch((prev) =>
-            prev.trim().length > 0 ? prev : branchesResult.currentBranch || branchesResult.branches[0] || ""
-          );
+          setSelectedRemoteBranch((prev) => {
+            const nextValue = prev.trim().length > 0 ? prev : branchesResult.currentBranch || branchesResult.branches[0] || "";
+            if (nextValue !== prev) {
+              setAllowProtectedPush(false);
+              setAllowBehindPush(false);
+            }
+            return nextValue;
+          });
         }
         if (untrackedResult.ok) {
           setSelectedNewFiles((prev) => prev.filter((item) => untrackedResult.files.includes(item)));
+        }
+        if (stashResult.ok) {
+          setStashEntries(stashResult.entries);
+        } else {
+          setStashEntries([]);
         }
 
         if (!historyResult.ok) {
@@ -56,6 +109,12 @@ export const useGitOperations = ({ setStatus, patchProjectMetaInList }: UseGitOp
           setStatus(`Branch list failed: ${branchesResult.message}`);
         } else if (!untrackedResult.ok) {
           setStatus(`Untracked files failed: ${untrackedResult.message}`);
+        } else if (!policyResult.ok) {
+          setStatus(`Git policy warning: ${policyResult.message}`);
+        } else if (!stashResult.ok) {
+          setStatus(`Stash list failed: ${stashResult.message}`);
+        } else if (!graphResult.ok) {
+          setStatus(`Git graph failed: ${graphResult.message}`);
         } else if (showSuccessStatus) {
           if (historyResult.canPush) {
             setStatus(
@@ -65,7 +124,7 @@ export const useGitOperations = ({ setStatus, patchProjectMetaInList }: UseGitOp
             setStatus("Git context refreshed: local changes detected, commit before push.");
           } else if (historyResult.behindCount > 0) {
             setStatus(
-              `Git context refreshed: remote has ${historyResult.behindCount} newer commit(s), pull first.`
+              `Git context refreshed: remote has ${historyResult.behindCount} newer commit(s), sync before push.`
             );
           } else {
             setStatus(`Git context refreshed for ${project.name}`);
@@ -76,6 +135,46 @@ export const useGitOperations = ({ setStatus, patchProjectMetaInList }: UseGitOp
         setRemoteHistory({ ok: false, message });
         setGitBranches({ ok: false, message, currentBranch: "", branches: [] });
         setGitUntrackedFiles({ ok: false, message, files: [] });
+        setGitPolicy({
+          ok: false,
+          message,
+          source: "default",
+          policy: {
+            workflow: "trunk_short_branch",
+            pullStrategy: "rebase",
+            protectedBranches: ["main", "master", "release"],
+            commitConvention: {
+              type: "conventional_commits",
+              allowedTypes: [
+                "feat",
+                "fix",
+                "chore",
+                "docs",
+                "refactor",
+                "test",
+                "build",
+                "ci",
+                "perf",
+                "revert",
+                "style"
+              ],
+              maxHeaderLength: 72
+            },
+            pushPolicy: {
+              requireUpToDateBeforePush: true,
+              warnWhenBehind: true,
+              confirmPushToProtected: true
+            },
+            branchPolicy: {
+              suggestPattern: "^(feat|fix|chore|hotfix|docs)/[a-z0-9._-]+$",
+              warnIfNotMatch: true
+            }
+          }
+        });
+        setGitGraph({ ok: false, message, nodes: [] });
+        setStashEntries([]);
+        setPublishPrecheck(null);
+        setLastSyncResult(null);
         setStatus(`Git context failed: ${message}`);
       } finally {
         setRemoteHistoryLoading(false);
@@ -94,6 +193,17 @@ export const useGitOperations = ({ setStatus, patchProjectMetaInList }: UseGitOp
       setRemoteHistory(null);
       setGitBranches(null);
       setGitUntrackedFiles(null);
+      setGitPolicy(null);
+      setPublishPrecheck(null);
+      setLastSyncResult(null);
+      setGitGraph(null);
+      setStashEntries([]);
+      setStashMessage("");
+      setStashIncludeUntracked(true);
+      setAllowProtectedPush(false);
+      setAllowBehindPush(false);
+      gitSyncStrategyUserSelectedRef.current = false;
+      setGitSyncStrategyState("rebase");
       setGitAddMode("all");
       setSelectedNewFiles([]);
       setSelectedRemoteBranch("");
@@ -112,6 +222,17 @@ export const useGitOperations = ({ setStatus, patchProjectMetaInList }: UseGitOp
     setRemoteHistory(null);
     setGitBranches(null);
     setGitUntrackedFiles(null);
+    setGitPolicy(null);
+    setPublishPrecheck(null);
+    setLastSyncResult(null);
+    setGitGraph(null);
+    setStashEntries([]);
+    setStashMessage("");
+    setStashIncludeUntracked(true);
+    setAllowProtectedPush(false);
+    setAllowBehindPush(false);
+    gitSyncStrategyUserSelectedRef.current = false;
+    setGitSyncStrategyState("rebase");
     setGitAddMode("all");
     setSelectedNewFiles([]);
     setSelectedRemoteBranch("");
@@ -131,6 +252,52 @@ export const useGitOperations = ({ setStatus, patchProjectMetaInList }: UseGitOp
       setGitWorkflowAction(null);
     }
   }, [editorProject, loadCommitContext, setStatus]);
+
+  const runPublishPrecheck = useCallback(async () => {
+    if (!editorProject) {
+      return null;
+    }
+    const remoteBranch = selectedRemoteBranch.trim();
+    if (!remoteBranch) {
+      setStatus("Please select a remote branch before precheck.");
+      return null;
+    }
+
+    setGitWorkflowAction("precheck");
+    setStatus(`Running publish precheck for ${editorProject.name}...`);
+    try {
+      const precheckResult = await electronApi.precheckGitPublish({
+        projectPath: editorProject.path,
+        message: editorValue,
+        remoteBranch
+      });
+      setPublishPrecheck(precheckResult);
+      if (!precheckResult.ok) {
+        setStatus(`Precheck failed: ${precheckResult.message}`);
+        return precheckResult;
+      }
+      const hasHighRiskBehind = precheckResult.issues.some(
+        (item) => item.code === "REMOTE_BEHIND" && item.risk === "high"
+      );
+      if (!hasHighRiskBehind) {
+        setAllowBehindPush(false);
+      }
+      const warnCount = precheckResult.issues.filter((item) => item.level === "warn").length;
+      const infoCount = precheckResult.issues.filter((item) => item.level === "info").length;
+      if (warnCount > 0 || infoCount > 0) {
+        setStatus(`Precheck completed with ${warnCount} warning(s) and ${infoCount} info item(s).`);
+      } else {
+        setStatus("Precheck passed with no warnings.");
+      }
+      return precheckResult;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown precheck error";
+      setStatus(`Precheck failed: ${message}`);
+      return null;
+    } finally {
+      setGitWorkflowAction(null);
+    }
+  }, [editorProject, editorValue, selectedRemoteBranch, setStatus]);
 
   const runGitAdd = useCallback(async () => {
     if (!editorProject) {
@@ -177,15 +344,64 @@ export const useGitOperations = ({ setStatus, patchProjectMetaInList }: UseGitOp
     }
     const remoteBranch = selectedRemoteBranch.trim();
     if (!remoteBranch) {
-      setStatus("Please select a remote branch before Git Pull.");
+      setStatus("Please select a remote branch before sync.");
       return;
     }
-    setGitWorkflowAction("pull");
-    setStatus(`Running git pull origin ${remoteBranch} for ${editorProject.name}...`);
+    setGitWorkflowAction("sync");
+    setLastSyncResult(null);
+    setStatus(`Running git sync (${gitSyncStrategy}) origin/${remoteBranch} for ${editorProject.name}...`);
     try {
-      const result = await electronApi.gitPull({
+      const result = await electronApi.gitSync({
         projectPath: editorProject.path,
-        remoteBranch
+        remoteBranch,
+        strategy: gitSyncStrategy
+      });
+      if (!result.ok) {
+        setLastSyncResult(result);
+        const errLine =
+          result.stderr
+            ?.split(/\r?\n/)
+            .map((line) => line.trim())
+            .find((line) => line.length > 0) ?? "";
+        setStatus(
+          `Git Sync failed: ${result.message}${errLine ? ` | ${errLine}` : ""}${
+            result.suggestion ? ` | Suggestion: ${result.suggestion}` : ""
+          }`
+        );
+        return;
+      }
+      setLastSyncResult(null);
+      setStatus(`Git Sync success: ${result.message}`);
+      setAllowBehindPush(false);
+      await loadCommitContext(editorProject, false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown git sync error";
+      setLastSyncResult({
+        ok: false,
+        strategy: gitSyncStrategy,
+        code: "UNKNOWN",
+        message,
+        suggestion: "Open terminal and inspect status before retrying sync.",
+        stdout: "",
+        stderr: ""
+      });
+      setStatus(`Git Sync failed: ${message}`);
+    } finally {
+      setGitWorkflowAction(null);
+    }
+  }, [editorProject, gitSyncStrategy, loadCommitContext, selectedRemoteBranch, setStatus]);
+
+  const runGitStashPush = useCallback(async () => {
+    if (!editorProject) {
+      return;
+    }
+    setGitWorkflowAction("stash_push");
+    setStatus(`Creating stash for ${editorProject.name}...`);
+    try {
+      const result = await electronApi.pushGitStash({
+        projectPath: editorProject.path,
+        message: stashMessage,
+        includeUntracked: stashIncludeUntracked
       });
       if (!result.ok) {
         const errLine =
@@ -193,18 +409,52 @@ export const useGitOperations = ({ setStatus, patchProjectMetaInList }: UseGitOp
             ?.split(/\r?\n/)
             .map((line) => line.trim())
             .find((line) => line.length > 0) ?? "";
-        setStatus(`Git Pull failed: ${result.message}${errLine ? ` | ${errLine}` : ""}`);
+        setStatus(`Git Stash failed: ${result.message}${errLine ? ` | ${errLine}` : ""}`);
         return;
       }
-      setStatus(`Git Pull success: ${result.message}`);
+      setStatus(`Git Stash success: ${result.message}`);
+      setStashMessage("");
       await loadCommitContext(editorProject, false);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unknown git pull error";
-      setStatus(`Git Pull failed: ${message}`);
+      const message = error instanceof Error ? error.message : "Unknown git stash push error";
+      setStatus(`Git Stash failed: ${message}`);
     } finally {
       setGitWorkflowAction(null);
     }
-  }, [editorProject, loadCommitContext, selectedRemoteBranch, setStatus]);
+  }, [editorProject, loadCommitContext, setStatus, stashIncludeUntracked, stashMessage]);
+
+  const runGitStashPop = useCallback(
+    async (stashRef?: string) => {
+      if (!editorProject) {
+        return;
+      }
+      setGitWorkflowAction("stash_pop");
+      setStatus(`Applying stash for ${editorProject.name}...`);
+      try {
+        const result = await electronApi.popGitStash({
+          projectPath: editorProject.path,
+          stashRef
+        });
+        if (!result.ok) {
+          const errLine =
+            result.stderr
+              ?.split(/\r?\n/)
+              .map((line) => line.trim())
+              .find((line) => line.length > 0) ?? "";
+          setStatus(`Git Stash pop failed: ${result.message}${errLine ? ` | ${errLine}` : ""}`);
+          return;
+        }
+        setStatus(`Git Stash pop success: ${result.message}`);
+        await loadCommitContext(editorProject, false);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Unknown git stash pop error";
+        setStatus(`Git Stash pop failed: ${message}`);
+      } finally {
+        setGitWorkflowAction(null);
+      }
+    },
+    [editorProject, loadCommitContext, setStatus]
+  );
 
   const submitEditor = useCallback(async () => {
     if (!editorMode || !editorProject) {
@@ -248,8 +498,42 @@ export const useGitOperations = ({ setStatus, patchProjectMetaInList }: UseGitOp
           setStatus("Please select a remote branch.");
           return;
         }
+
         setGitWorkflowAction("publish");
-        setStatus(`Running git commit and git push for ${editorProject.name}...`);
+        setStatus(`Running publish precheck for ${editorProject.name}...`);
+
+        const precheckResult = await electronApi.precheckGitPublish({
+          projectPath: editorProject.path,
+          message,
+          remoteBranch
+        });
+        setPublishPrecheck(precheckResult);
+        if (!precheckResult.ok) {
+          setStatus(`Precheck failed: ${precheckResult.message}`);
+          return;
+        }
+
+        const protectedBranchIssue = precheckResult.issues.find((item) => item.code === "PROTECTED_BRANCH_PUSH");
+        if (protectedBranchIssue && !allowProtectedPush) {
+          setStatus("Protected branch push requires confirmation. Enable confirmation and publish again.");
+          return;
+        }
+
+        const behindRiskIssue = precheckResult.issues.find(
+          (item) => item.code === "REMOTE_BEHIND" && item.risk === "high"
+        );
+        if (behindRiskIssue && !allowBehindPush) {
+          setStatus("Remote is ahead and policy prefers sync first. Click Sync or enable override, then publish again.");
+          return;
+        }
+
+        const warningIssues = precheckResult.issues.filter((item) => item.level === "warn");
+        if (warningIssues.length > 0) {
+          setStatus(`Publishing with ${warningIssues.length} precheck warning(s)...`);
+        } else {
+          setStatus(`Running git commit and git push for ${editorProject.name}...`);
+        }
+
         const result = await electronApi.commitAndPush({
           projectPath: editorProject.path,
           message,
@@ -274,6 +558,8 @@ export const useGitOperations = ({ setStatus, patchProjectMetaInList }: UseGitOp
       setGitWorkflowAction(null);
     }
   }, [
+    allowBehindPush,
+    allowProtectedPush,
     closeEditor,
     editorMode,
     editorProject,
@@ -285,9 +571,11 @@ export const useGitOperations = ({ setStatus, patchProjectMetaInList }: UseGitOp
 
   const gitWorkflowBusy = gitWorkflowAction !== null;
   const isAdding = gitWorkflowAction === "add";
-  const isPulling = gitWorkflowAction === "pull";
+  const isPulling = gitWorkflowAction === "sync";
   const isRefreshingGit = gitWorkflowAction === "refresh";
   const isPublishing = gitWorkflowAction === "publish";
+  const isRunningPrecheck = gitWorkflowAction === "precheck";
+  const isStashing = gitWorkflowAction === "stash_push" || gitWorkflowAction === "stash_pop";
 
   return {
     editorMode,
@@ -297,6 +585,21 @@ export const useGitOperations = ({ setStatus, patchProjectMetaInList }: UseGitOp
     remoteHistory,
     gitBranches,
     gitUntrackedFiles,
+    gitPolicy,
+    publishPrecheck,
+    lastSyncResult,
+    gitGraph,
+    stashEntries,
+    stashMessage,
+    setStashMessage,
+    stashIncludeUntracked,
+    setStashIncludeUntracked,
+    allowProtectedPush,
+    setAllowProtectedPush,
+    allowBehindPush,
+    setAllowBehindPush,
+    gitSyncStrategy,
+    setGitSyncStrategy,
     gitAddMode,
     setGitAddMode,
     selectedNewFiles,
@@ -309,11 +612,16 @@ export const useGitOperations = ({ setStatus, patchProjectMetaInList }: UseGitOp
     isPulling,
     isRefreshingGit,
     isPublishing,
+    isRunningPrecheck,
+    isStashing,
     openEditor,
     closeEditor,
     loadRemoteHistory,
+    runPublishPrecheck,
     runGitAdd,
     runGitPull,
+    runGitStashPush,
+    runGitStashPop,
     submitEditor
   };
 };

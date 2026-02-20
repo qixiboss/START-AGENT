@@ -3,6 +3,7 @@ import { LaunchRecordsPanel } from "./LaunchRecordsPanel";
 import { EmbeddedSessionsPanel } from "./EmbeddedSessionsPanel";
 import type {
   ProjectItem,
+  SessionToolType,
   TerminalApprovalRequest,
   TerminalSessionInfo,
   TerminalSessionInputState,
@@ -12,12 +13,13 @@ import type {
 import { EmbeddedTerminalHandle } from "../EmbeddedTerminal";
 
 type TerminalStageProps = {
+  desktopApiAvailable: boolean;
   useExternalTerminal: boolean;
   setUseExternalTerminal: Dispatch<SetStateAction<boolean>>;
   loadTerminalLaunches: () => Promise<void>;
   loadTerminalSessions: () => Promise<void>;
   selectedProject: ProjectItem | null;
-  createEmbeddedSession: (project: ProjectItem, tool: "codex" | "claude" | "shell") => Promise<void>;
+  createEmbeddedSession: (project: ProjectItem, tool: SessionToolType) => Promise<void>;
   launchRecords: Parameters<typeof LaunchRecordsPanel>[0]["launchRecords"];
   focusLaunchRecord: Parameters<typeof LaunchRecordsPanel>[0]["focusLaunchRecord"];
   editingLaunchNoteId: Parameters<typeof LaunchRecordsPanel>[0]["editingLaunchNoteId"];
@@ -38,7 +40,7 @@ type TerminalStageProps = {
   scrollActiveTerminalToBottom: () => void;
   approvalBySession: Record<string, TerminalApprovalRequest>;
   submitApproval: (sessionId: string, decision: "allow_once" | "allow_session" | "deny") => Promise<void>;
-  terminalHandleRef: RefObject<EmbeddedTerminalHandle | null>;
+  terminalHandleRef: RefObject<EmbeddedTerminalHandle>;
   terminalOutputBySession: Record<string, string>;
   sendTerminalData: (data: string) => void;
   resizeEmbeddedSession: (sessionId: string, cols: number, rows: number) => Promise<void>;
@@ -48,6 +50,7 @@ type TerminalStageProps = {
 
 export const TerminalStage = memo((props: TerminalStageProps): JSX.Element => {
   const {
+    desktopApiAvailable,
     useExternalTerminal,
     setUseExternalTerminal,
     loadTerminalLaunches,
@@ -88,26 +91,36 @@ export const TerminalStage = memo((props: TerminalStageProps): JSX.Element => {
         <div>
           <h2>{useExternalTerminal ? "Windows PowerShell Stage" : "Embedded Session Stage"}</h2>
           <p className="hint">
-            {useExternalTerminal
+            {!desktopApiAvailable
+              ? "Browser preview mode. Launch the Electron desktop app for full terminal session features."
+              : useExternalTerminal
               ? "External PowerShell windows are launched per action."
-              : "Run Codex / Claude / Shell directly in this workspace."}
+              : "Run Codex / Claude / OpenCode / Shell directly in this workspace."}
           </p>
         </div>
         <div className="header-actions">
-          <button className="btn secondary" onClick={() => setUseExternalTerminal((prev) => !prev)}>
+          <button
+            className="btn secondary"
+            onClick={() => setUseExternalTerminal((prev) => !prev)}
+            disabled={!desktopApiAvailable}
+          >
             {useExternalTerminal ? "Switch to Embedded" : "Switch to External"}
           </button>
           {useExternalTerminal ? (
-            <button className="btn secondary" onClick={() => void loadTerminalLaunches()}>
+            <button className="btn secondary" onClick={() => void loadTerminalLaunches()} disabled={!desktopApiAvailable}>
               Refresh Launches
             </button>
           ) : (
             <>
-              <button className="btn secondary" onClick={() => void loadTerminalSessions()}>
+              <button className="btn secondary" onClick={() => void loadTerminalSessions()} disabled={!desktopApiAvailable}>
                 Refresh Sessions
               </button>
               {selectedProject ? (
-                <button className="btn secondary" onClick={() => void createEmbeddedSession(selectedProject, "shell")}>
+                <button
+                  className="btn secondary"
+                  onClick={() => void createEmbeddedSession(selectedProject, "shell")}
+                  disabled={!desktopApiAvailable}
+                >
                   Open Shell
                 </button>
               ) : null}
@@ -117,6 +130,11 @@ export const TerminalStage = memo((props: TerminalStageProps): JSX.Element => {
       </header>
 
       <div className="launch-stage">
+        {!desktopApiAvailable ? (
+          <div className="preview-inline-notice">
+            Preview mode is active. Terminal creation, process restore, and interactive shell actions are available in Electron only.
+          </div>
+        ) : null}
         {useExternalTerminal ? (
           <LaunchRecordsPanel
             launchRecords={launchRecords}

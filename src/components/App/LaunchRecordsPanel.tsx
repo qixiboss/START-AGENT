@@ -32,7 +32,7 @@ export const LaunchRecordsPanel = memo((props: LaunchRecordsPanelProps): JSX.Ele
     return (
       <div className="terminal-empty">
         <h3>No Windows PowerShell Launches</h3>
-        <p>Choose a project on the right and open Codex or Claude.</p>
+        <p>Choose a project on the right and open Codex, Claude, or OpenCode.</p>
       </div>
     );
   }

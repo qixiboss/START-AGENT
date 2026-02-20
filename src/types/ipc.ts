@@ -14,7 +14,7 @@ export type ListProjectsResult =
   | { ok: true; projects: ProjectItem[]; rootPath: string }
   | { ok: false; message: string; projects: ProjectItem[]; rootPath: string };
 
-export type ToolType = "codex" | "claude";
+export type ToolType = "codex" | "claude" | "opencode";
 export type SessionToolType = ToolType | "shell";
 
 export type TerminalLaunchRequest = {
@@ -96,6 +96,197 @@ export type GitPullResult =
       message: string;
       stdout: string;
       stderr: string;
+    };
+
+export type GitSyncStrategy = "rebase" | "merge" | "ff-only";
+
+export type GitPolicy = {
+  workflow: "trunk_short_branch";
+  pullStrategy: GitSyncStrategy;
+  protectedBranches: string[];
+  commitConvention: {
+    type: "conventional_commits" | "none";
+    allowedTypes: string[];
+    maxHeaderLength: number;
+  };
+  pushPolicy: {
+    requireUpToDateBeforePush: boolean;
+    warnWhenBehind: boolean;
+    confirmPushToProtected: boolean;
+  };
+  branchPolicy: {
+    suggestPattern: string;
+    warnIfNotMatch: boolean;
+  };
+};
+
+export type GitPolicyLoadResult =
+  | {
+      ok: true;
+      policy: GitPolicy;
+      source: "project" | "default";
+      warning?: string;
+    }
+  | {
+      ok: false;
+      message: string;
+      policy: GitPolicy;
+      source: "default";
+    };
+
+export type GitValidationIssueCode =
+  | "POLICY_LOAD_FAILED"
+  | "COMMIT_FORMAT"
+  | "COMMIT_TYPE"
+  | "COMMIT_HEADER_TOO_LONG"
+  | "BRANCH_NAME_PATTERN"
+  | "PROTECTED_BRANCH_PUSH"
+  | "REMOTE_BEHIND"
+  | "UNCOMMITTED_CHANGES"
+  | "REMOTE_BRANCH_MISSING";
+
+export type GitValidationRisk = "low" | "medium" | "high";
+
+export type GitValidationIssue = {
+  level: "info" | "warn";
+  risk: GitValidationRisk;
+  code: GitValidationIssueCode;
+  message: string;
+  suggestion?: string;
+};
+
+export type GitPublishPrecheckRequest = {
+  projectPath: string;
+  message: string;
+  remoteBranch?: string;
+};
+
+export type GitPublishPrecheckResult =
+  | {
+      ok: true;
+      currentBranch: string;
+      remoteBranch: string;
+      upstreamRef: string;
+      hasLocalChanges: boolean;
+      aheadCount: number;
+      behindCount: number;
+      remoteBranchExists: boolean;
+      issues: GitValidationIssue[];
+      policy: GitPolicy;
+    }
+  | {
+      ok: false;
+      message: string;
+      issues: GitValidationIssue[];
+      policy?: GitPolicy;
+    };
+
+export type GitSyncRequest = {
+  projectPath: string;
+  remoteBranch?: string;
+  strategy?: GitSyncStrategy;
+};
+
+export type GitSyncErrorCode =
+  | "CONFLICT"
+  | "REBASE_IN_PROGRESS"
+  | "FF_ONLY_REJECTED"
+  | "LOCAL_CHANGES_BLOCK"
+  | "UNKNOWN";
+
+export type GitSyncResult =
+  | {
+      ok: true;
+      strategy: GitSyncStrategy;
+      message: string;
+      stdout: string;
+      stderr: string;
+    }
+  | {
+      ok: false;
+      strategy: GitSyncStrategy;
+      message: string;
+      code?: GitSyncErrorCode;
+      suggestion?: string;
+      stdout: string;
+      stderr: string;
+    };
+
+export type GitStashEntry = {
+  ref: string;
+  branch?: string;
+  summary: string;
+};
+
+export type GitStashListResult =
+  | {
+      ok: true;
+      entries: GitStashEntry[];
+    }
+  | {
+      ok: false;
+      message: string;
+      entries: GitStashEntry[];
+    };
+
+export type GitStashPushRequest = {
+  projectPath: string;
+  message?: string;
+  includeUntracked?: boolean;
+};
+
+export type GitStashPushResult =
+  | {
+      ok: true;
+      created: boolean;
+      message: string;
+      stdout: string;
+      stderr: string;
+    }
+  | {
+      ok: false;
+      message: string;
+      stdout: string;
+      stderr: string;
+    };
+
+export type GitStashPopRequest = {
+  projectPath: string;
+  stashRef?: string;
+};
+
+export type GitStashPopResult =
+  | {
+      ok: true;
+      message: string;
+      stdout: string;
+      stderr: string;
+    }
+  | {
+      ok: false;
+      message: string;
+      stdout: string;
+      stderr: string;
+    };
+
+export type GitGraphNode = {
+  hash: string;
+  shortHash: string;
+  author: string;
+  date: string;
+  refs: string;
+  subject: string;
+};
+
+export type GitGraphResult =
+  | {
+      ok: true;
+      nodes: GitGraphNode[];
+    }
+  | {
+      ok: false;
+      message: string;
+      nodes: GitGraphNode[];
     };
 
 export type GitUntrackedFilesResult =
@@ -256,11 +447,97 @@ export type TerminalApprovalSubmitResult =
   | { ok: true }
   | { ok: false; message: string };
 
+export type QuotaProvider = "codex_chatgpt" | "volcengine_coding_plan";
+export type QuotaStatus = "available" | "manual_only" | "error";
+export type QuotaMethod = "api" | "command" | "page";
+export type QuotaBrowserSource = "auto" | "chrome" | "edge";
+export type QuotaSecretStorageMode = "encrypted" | "plain";
+
+export type QuotaItem = {
+  provider: QuotaProvider;
+  status: QuotaStatus;
+  title: string;
+  detail: string;
+  checkedAt: number;
+  consoleUrl: string;
+};
+
+export type QuotaListResult =
+  | { ok: true; items: QuotaItem[] }
+  | { ok: false; message: string; items: QuotaItem[] };
+
+export type QuotaAuthProviderConfig = {
+  provider: QuotaProvider;
+  title: string;
+  consoleUrl: string;
+  apiUrl: string;
+  methods: QuotaMethod[];
+  commandJson: string;
+  hasCookie: boolean;
+  updatedAt: number;
+};
+
+export type QuotaAuthListResult =
+  | { ok: true; providers: QuotaAuthProviderConfig[]; storageMode: QuotaSecretStorageMode }
+  | { ok: false; message: string; providers: QuotaAuthProviderConfig[]; storageMode: QuotaSecretStorageMode };
+
+export type QuotaAuthSaveRequest = {
+  provider: QuotaProvider;
+  cookie?: string;
+  clearCookie?: boolean;
+  apiUrl?: string;
+  consoleUrl?: string;
+  methods?: QuotaMethod[];
+  commandJson?: string;
+};
+
+export type QuotaAuthSaveResult =
+  | { ok: true; config: QuotaAuthProviderConfig; storageMode: QuotaSecretStorageMode; warning?: string }
+  | { ok: false; message: string };
+
+export type QuotaAuthImportRequest = {
+  provider: QuotaProvider;
+  browser?: QuotaBrowserSource;
+};
+
+export type QuotaAuthImportResult =
+  | {
+      ok: true;
+      config: QuotaAuthProviderConfig;
+      storageMode: QuotaSecretStorageMode;
+      browser: Exclude<QuotaBrowserSource, "auto">;
+      profile: string;
+      cookieCount: number;
+      warning?: string;
+    }
+  | { ok: false; message: string };
+
+export type QuotaAuthAuthorizeInAppRequest = {
+  provider: QuotaProvider;
+};
+
+export type QuotaAuthAuthorizeInAppResult =
+  | {
+      ok: true;
+      config: QuotaAuthProviderConfig;
+      storageMode: QuotaSecretStorageMode;
+      cookieCount: number;
+      warning?: string;
+    }
+  | { ok: false; message: string; cancelled?: boolean };
+
 export const IpcChannels = {
   RootGet: "root:get",
   RootSet: "root:set",
   ListProjects: "projects:list",
   ProjectMetaSet: "projectMeta:set",
+  GitPolicyGet: "git:policy:get",
+  GitPublishPrecheck: "git:publishPrecheck",
+  GitSync: "git:sync",
+  GitStashList: "git:stash:list",
+  GitStashPush: "git:stash:push",
+  GitStashPop: "git:stash:pop",
+  GitGraph: "git:graph",
   GitCommitAndPush: "git:commitAndPush",
   GitRemoteHistory: "git:remoteHistory",
   GitBranches: "git:branches",
@@ -284,6 +561,12 @@ export const IpcChannels = {
   TerminalSessionStatusEvent: "terminal:session:status",
   TerminalSessionInputStateEvent: "terminal:session:inputState",
   TerminalApprovalRequiredEvent: "terminal:session:approvalRequired",
+  QuotaList: "quota:list",
+  QuotaAuthGet: "quota:auth:get",
+  QuotaAuthSave: "quota:auth:save",
+  QuotaAuthImportBrowser: "quota:auth:importBrowser",
+  QuotaAuthAuthorizeInApp: "quota:auth:authorizeInApp",
+  SystemOpenExternal: "system:openExternal",
   WindowMinimize: "window:minimize",
   WindowMaximize: "window:maximize",
   WindowClose: "window:close",
@@ -295,6 +578,13 @@ export type DesktopApi = {
   setRootPath: (path: string) => Promise<ListProjectsResult>;
   listProjects: () => Promise<ListProjectsResult>;
   setProjectMeta: (request: ProjectMetaSetRequest) => Promise<ProjectMetaSetResult>;
+  getGitPolicy: (projectPath: string) => Promise<GitPolicyLoadResult>;
+  precheckGitPublish: (request: GitPublishPrecheckRequest) => Promise<GitPublishPrecheckResult>;
+  gitSync: (request: GitSyncRequest) => Promise<GitSyncResult>;
+  listGitStash: (projectPath: string) => Promise<GitStashListResult>;
+  pushGitStash: (request: GitStashPushRequest) => Promise<GitStashPushResult>;
+  popGitStash: (request: GitStashPopRequest) => Promise<GitStashPopResult>;
+  getGitGraph: (projectPath: string, limit?: number) => Promise<GitGraphResult>;
   commitAndPush: (request: GitCommitRequest) => Promise<GitCommitResult>;
   getRemoteHistory: (projectPath: string) => Promise<GitRemoteHistoryResult>;
   listGitBranches: (projectPath: string) => Promise<GitBranchesResult>;
@@ -325,6 +615,12 @@ export type DesktopApi = {
   onTerminalSessionStatus: (handler: (event: TerminalSessionStatusEvent) => void) => () => void;
   onTerminalSessionInputState: (handler: (event: TerminalSessionInputState) => void) => () => void;
   onTerminalApprovalRequired: (handler: (event: TerminalApprovalRequest) => void) => () => void;
+  listQuotas: () => Promise<QuotaListResult>;
+  getQuotaAuthConfigs: () => Promise<QuotaAuthListResult>;
+  saveQuotaAuthConfig: (request: QuotaAuthSaveRequest) => Promise<QuotaAuthSaveResult>;
+  importQuotaAuthFromBrowser: (request: QuotaAuthImportRequest) => Promise<QuotaAuthImportResult>;
+  authorizeQuotaInApp: (request: QuotaAuthAuthorizeInAppRequest) => Promise<QuotaAuthAuthorizeInAppResult>;
+  openExternal: (url: string) => Promise<{ ok: true } | { ok: false; message: string }>;
   minimizeWindow: () => Promise<{ ok: true }>;
   maximizeWindow: () => Promise<{ ok: true }>;
   closeWindow: () => Promise<{ ok: true }>;

@@ -2,6 +2,7 @@
 import { electronApi } from "../services/electronApi";
 import type {
   ProjectItem,
+  SessionToolType,
   TerminalApprovalRequest,
   TerminalSessionInfo,
   TerminalSessionInputState,
@@ -36,7 +37,7 @@ export const useEmbeddedSessionActions = ({
   loadTerminalSnapshots
 }: UseEmbeddedSessionActionsArgs) => {
   const createEmbeddedSession = useCallback(
-    async (project: ProjectItem, tool: "codex" | "claude" | "shell") => {
+    async (project: ProjectItem, tool: SessionToolType) => {
       try {
         setStatus(`Starting ${tool} session for ${project.name}...`);
         const result = await withTimeout(

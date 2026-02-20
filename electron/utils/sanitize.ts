@@ -24,7 +24,7 @@ export const sanitizeLaunches = (value: unknown): TerminalLaunchRecord[] => {
         typeof candidate.id !== "string" ||
         typeof candidate.projectPath !== "string" ||
         typeof candidate.projectName !== "string" ||
-        (candidate.tool !== "codex" && candidate.tool !== "claude") ||
+        (candidate.tool !== "codex" && candidate.tool !== "claude" && candidate.tool !== "opencode") ||
         typeof candidate.command !== "string" ||
         typeof candidate.createdAt !== "number"
       ) {
@@ -76,7 +76,10 @@ export const sanitizeSessionSnapshots = (value: unknown): TerminalSessionSnapsho
         typeof candidate.id !== "string" ||
         typeof candidate.projectPath !== "string" ||
         typeof candidate.projectName !== "string" ||
-        (candidate.tool !== "codex" && candidate.tool !== "claude" && candidate.tool !== "shell") ||
+        (candidate.tool !== "codex" &&
+          candidate.tool !== "claude" &&
+          candidate.tool !== "opencode" &&
+          candidate.tool !== "shell") ||
         typeof candidate.command !== "string" ||
         typeof candidate.createdAt !== "number" ||
         typeof candidate.updatedAt !== "number" ||

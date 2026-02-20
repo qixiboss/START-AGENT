@@ -1,6 +1,7 @@
-﻿import { BrowserWindow } from "electron";
+import { BrowserWindow } from "electron";
 import { registerGitIpc } from "./git.js";
 import { registerProjectsIpc } from "./projects.js";
+import { registerQuotaIpc } from "./quota.js";
 import { registerTerminalIpc } from "./terminal.js";
 import { registerWindowIpc } from "./window.js";
 
@@ -9,11 +10,13 @@ export type RegisterIpcArgs = {
   projects: Parameters<typeof registerProjectsIpc>[1];
   git: Parameters<typeof registerGitIpc>[1];
   terminal: Parameters<typeof registerTerminalIpc>[1];
+  quota: Parameters<typeof registerQuotaIpc>[1];
 };
 
 export const registerIpc = (args: RegisterIpcArgs): void => {
   registerProjectsIpc(args.mainWindow, args.projects);
   registerGitIpc(args.mainWindow, args.git);
   registerTerminalIpc(args.mainWindow, args.terminal);
+  registerQuotaIpc(args.mainWindow, args.quota);
   registerWindowIpc(args.mainWindow);
 };
